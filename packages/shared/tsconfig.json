@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // Kept inside outDir so deleting dist also drops the incremental state.
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "baseUrl": "."
+  },
+  "include": ["src/**/*"]
+}
