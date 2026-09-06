@@ -1,0 +1,195 @@
+# Production-shaped stack. `docker-compose.override.yml` is layered on top
+# automatically for local development (source mounts, hot reload, debuggers).
+name: ${COMPOSE_PROJECT_NAME}
+
+x-pg-common: &pg-common
+  image: postgres:${POSTGRES_VERSION}
+  restart: unless-stopped
+  networks: [payment-net]
+  stop_grace_period: 10s
+
+x-app-common: &app-common
+  restart: unless-stopped
+  networks: [payment-net]
+  stop_grace_period: 15s
+  environment: &app-env
+    NODE_ENV: ${NODE_ENV}
+    LOG_LEVEL: ${LOG_LEVEL}
+    DB_LOGGING: ${DB_LOGGING}
+    RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${RABBITMQ_HOST}:${RABBITMQ_PORT}
+    INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
+
+x-app-healthcheck: &app-healthcheck
+  test:
+    [
+      'CMD',
+      'node',
+      '-e',
+      "fetch('http://127.0.0.1:'+process.env.PORT+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+    ]
+  interval: 10s
+  timeout: 3s
+  retries: 6
+  start_period: 25s
+
+services:
+  # ------------------------------------------------------------------ data --
+  pg-accounts:
+    <<: *pg-common
+    environment:
+      POSTGRES_DB: ${ACCOUNTS_DB_NAME}
+      POSTGRES_USER: ${ACCOUNTS_DB_USER}
+      POSTGRES_PASSWORD: ${ACCOUNTS_DB_PASSWORD}
+    ports:
+      - '${ACCOUNTS_DB_EXPOSED_PORT}:5432'
+    volumes:
+      - pg-accounts-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${ACCOUNTS_DB_USER} -d ${ACCOUNTS_DB_NAME}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  pg-transactions:
+    <<: *pg-common
+    environment:
+      POSTGRES_DB: ${TRANSACTIONS_DB_NAME}
+      POSTGRES_USER: ${TRANSACTIONS_DB_USER}
+      POSTGRES_PASSWORD: ${TRANSACTIONS_DB_PASSWORD}
+    ports:
+      - '${TRANSACTIONS_DB_EXPOSED_PORT}:5432'
+    volumes:
+      - pg-transactions-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${TRANSACTIONS_DB_USER} -d ${TRANSACTIONS_DB_NAME}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  pg-payments:
+    <<: *pg-common
+    environment:
+      POSTGRES_DB: ${PAYMENTS_DB_NAME}
+      POSTGRES_USER: ${PAYMENTS_DB_USER}
+      POSTGRES_PASSWORD: ${PAYMENTS_DB_PASSWORD}
+    ports:
+      - '${PAYMENTS_DB_EXPOSED_PORT}:5432'
+    volumes:
+      - pg-payments-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${PAYMENTS_DB_USER} -d ${PAYMENTS_DB_NAME}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  rabbitmq:
+    image: rabbitmq:${RABBITMQ_VERSION}
+    restart: unless-stopped
+    networks: [payment-net]
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
+    ports:
+      - '${RABBITMQ_EXPOSED_PORT}:5672'
+      - '${RABBITMQ_MANAGEMENT_PORT}:15672'
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_running']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ------------------------------------------------------------------ apps --
+  accounts:
+    <<: *app-common
+    build:
+      context: .
+      dockerfile: services/accounts/Dockerfile
+      target: runner
+    environment:
+      <<: *app-env
+      PORT: ${ACCOUNTS_PORT}
+      DB_HOST: ${ACCOUNTS_DB_HOST}
+      DB_PORT: ${ACCOUNTS_DB_PORT}
+      DB_USER: ${ACCOUNTS_DB_USER}
+      DB_PASSWORD: ${ACCOUNTS_DB_PASSWORD}
+      DB_NAME: ${ACCOUNTS_DB_NAME}
+    ports:
+      - '${ACCOUNTS_PORT}:${ACCOUNTS_PORT}'
+    depends_on:
+      pg-accounts:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck: *app-healthcheck
+
+  transactions:
+    <<: *app-common
+    build:
+      context: .
+      dockerfile: services/transactions/Dockerfile
+      target: runner
+    environment:
+      <<: *app-env
+      PORT: ${TRANSACTIONS_PORT}
+      DB_HOST: ${TRANSACTIONS_DB_HOST}
+      DB_PORT: ${TRANSACTIONS_DB_PORT}
+      DB_USER: ${TRANSACTIONS_DB_USER}
+      DB_PASSWORD: ${TRANSACTIONS_DB_PASSWORD}
+      DB_NAME: ${TRANSACTIONS_DB_NAME}
+    ports:
+      - '${TRANSACTIONS_PORT}:${TRANSACTIONS_PORT}'
+    depends_on:
+      pg-transactions:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck: *app-healthcheck
+
+  payments:
+    <<: *app-common
+    build:
+      context: .
+      dockerfile: services/payments/Dockerfile
+      target: runner
+    environment:
+      <<: *app-env
+      PORT: ${PAYMENTS_PORT}
+      DB_HOST: ${PAYMENTS_DB_HOST}
+      DB_PORT: ${PAYMENTS_DB_PORT}
+      DB_USER: ${PAYMENTS_DB_USER}
+      DB_PASSWORD: ${PAYMENTS_DB_PASSWORD}
+      DB_NAME: ${PAYMENTS_DB_NAME}
+      ACCOUNTS_SERVICE_URL: ${ACCOUNTS_SERVICE_URL}
+      TRANSACTIONS_SERVICE_URL: ${TRANSACTIONS_SERVICE_URL}
+      HTTP_TIMEOUT_MS: ${HTTP_TIMEOUT_MS}
+      HTTP_MAX_RETRIES: ${HTTP_MAX_RETRIES}
+    ports:
+      - '${PAYMENTS_PORT}:${PAYMENTS_PORT}'
+    depends_on:
+      pg-payments:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      accounts:
+        condition: service_healthy
+      transactions:
+        condition: service_healthy
+    healthcheck: *app-healthcheck
+
+networks:
+  payment-net:
+    driver: bridge
+
+volumes:
+  pg-accounts-data:
+  pg-transactions-data:
+  pg-payments-data:
+  rabbitmq-data:

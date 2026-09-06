@@ -1,0 +1,49 @@
+# Local development layer, applied automatically on top of docker-compose.yml.
+# Sources are bind-mounted and each app runs `pnpm start:dev` with a debugger
+# port attached. Container node_modules are shielded from the host by anonymous
+# volumes so a macOS/Linux install mismatch cannot leak in.
+services:
+  accounts:
+    build:
+      target: dev
+    environment:
+      NODE_ENV: development
+    ports:
+      - '${ACCOUNTS_DEBUG_PORT}:9229'
+    volumes:
+      - ./services/accounts/src:/app/services/accounts/src:cached
+      - ./services/accounts/test:/app/services/accounts/test:cached
+      - ./packages/shared/src:/app/packages/shared/src:cached
+      - /app/node_modules
+      - /app/services/accounts/node_modules
+      - /app/packages/shared/node_modules
+
+  transactions:
+    build:
+      target: dev
+    environment:
+      NODE_ENV: development
+    ports:
+      - '${TRANSACTIONS_DEBUG_PORT}:9229'
+    volumes:
+      - ./services/transactions/src:/app/services/transactions/src:cached
+      - ./services/transactions/test:/app/services/transactions/test:cached
+      - ./packages/shared/src:/app/packages/shared/src:cached
+      - /app/node_modules
+      - /app/services/transactions/node_modules
+      - /app/packages/shared/node_modules
+
+  payments:
+    build:
+      target: dev
+    environment:
+      NODE_ENV: development
+    ports:
+      - '${PAYMENTS_DEBUG_PORT}:9229'
+    volumes:
+      - ./services/payments/src:/app/services/payments/src:cached
+      - ./services/payments/test:/app/services/payments/test:cached
+      - ./packages/shared/src:/app/packages/shared/src:cached
+      - /app/node_modules
+      - /app/services/payments/node_modules
+      - /app/packages/shared/node_modules
