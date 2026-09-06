@@ -1,0 +1,52 @@
+{
+  "extends": "../../.eslintrc.json",
+  "overrides": [
+    {
+      "files": ["src/domain/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              "@nestjs/*",
+              "typeorm",
+              "typeorm/*",
+              "axios",
+              "rxjs",
+              "rxjs/*",
+              "class-validator",
+              "class-transformer",
+              "@paynad/shared",
+              "**/infrastructure/**",
+              "**/presentation/**",
+              "**/application/**"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/application/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              "typeorm",
+              "typeorm/*",
+              "axios",
+              "**/infrastructure/**",
+              "**/presentation/**"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/infrastructure/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": ["error", { "patterns": ["**/presentation/**"] }]
+      }
+    }
+  ]
+}

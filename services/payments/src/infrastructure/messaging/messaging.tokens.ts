@@ -1,0 +1,1 @@
+export const TRANSACTIONS_CLIENT = Symbol('TRANSACTIONS_CLIENT');
