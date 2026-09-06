@@ -1,0 +1,175 @@
+# ---------------------------------------------------------------------------
+# The end-to-end stack, isolated from the development one.
+#
+# Everything here is disposable: the three databases and the broker keep their
+# state in tmpfs, so a run always starts on empty schemas and `down` leaves
+# nothing behind. Nothing is published on the host either, which means this
+# stack can run next to `make up` — and in CI — without a port clash.
+#
+#   make test:e2e-isolated
+#
+# Values are hard-coded rather than read from .env on purpose: a test stack that
+# depends on a developer's local file is a test stack that fails in CI.
+# ---------------------------------------------------------------------------
+name: paynad-test
+
+x-pg-test: &pg-test
+  image: postgres:16-alpine
+  networks: [payment-test-net]
+  # The whole point: no volume, no durability, no leftovers between runs.
+  tmpfs:
+    - /var/lib/postgresql/data
+  command: >
+    postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off
+
+x-app-test: &app-test
+  networks: [payment-test-net]
+  environment: &app-test-env
+    NODE_ENV: development
+    LOG_LEVEL: warn
+    DB_LOGGING: 'false'
+    RABBITMQ_URL: amqp://paynad:paynad_pwd@rabbitmq:5672
+    INTERNAL_API_KEY: test-internal-key-0123456789
+    INTERNAL_API_SECRET: test-internal-secret-0123456789-0123456789
+    ACCOUNTS_SERVICE_URL: http://accounts:3001
+    TRANSACTIONS_SERVICE_URL: http://transactions:3002
+
+x-app-healthcheck: &app-healthcheck
+  test:
+    [
+      'CMD',
+      'node',
+      '-e',
+      "fetch('http://127.0.0.1:'+process.env.PORT+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+    ]
+  interval: 5s
+  timeout: 3s
+  retries: 12
+  start_period: 40s
+
+services:
+  pg-accounts:
+    <<: *pg-test
+    environment:
+      POSTGRES_DB: accounts
+      POSTGRES_USER: accounts_user
+      POSTGRES_PASSWORD: accounts_pwd
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U accounts_user -d accounts']
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  pg-transactions:
+    <<: *pg-test
+    environment:
+      POSTGRES_DB: transactions
+      POSTGRES_USER: transactions_user
+      POSTGRES_PASSWORD: transactions_pwd
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U transactions_user -d transactions']
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  pg-payments:
+    <<: *pg-test
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: payments_user
+      POSTGRES_PASSWORD: payments_pwd
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U payments_user -d payments']
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    networks: [payment-test-net]
+    environment:
+      RABBITMQ_DEFAULT_USER: paynad
+      RABBITMQ_DEFAULT_PASS: paynad_pwd
+    tmpfs:
+      - /var/lib/rabbitmq
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_running']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  # The `dev` image, not `runner`: the suites are run inside these containers,
+  # so jest, ts-jest and the specs themselves have to be there.
+  accounts:
+    <<: *app-test
+    build:
+      context: .
+      dockerfile: services/accounts/Dockerfile
+      target: dev
+    environment:
+      <<: *app-test-env
+      PORT: 3001
+      DB_HOST: pg-accounts
+      DB_PORT: 5432
+      DB_USER: accounts_user
+      DB_PASSWORD: accounts_pwd
+      DB_NAME: accounts
+    depends_on:
+      pg-accounts:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck: *app-healthcheck
+
+  transactions:
+    <<: *app-test
+    build:
+      context: .
+      dockerfile: services/transactions/Dockerfile
+      target: dev
+    environment:
+      <<: *app-test-env
+      PORT: 3002
+      DB_HOST: pg-transactions
+      DB_PORT: 5432
+      DB_USER: transactions_user
+      DB_PASSWORD: transactions_pwd
+      DB_NAME: transactions
+    depends_on:
+      pg-transactions:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck: *app-healthcheck
+
+  payments:
+    <<: *app-test
+    build:
+      context: .
+      dockerfile: services/payments/Dockerfile
+      target: dev
+    environment:
+      <<: *app-test-env
+      PORT: 3003
+      DB_HOST: pg-payments
+      DB_PORT: 5432
+      DB_USER: payments_user
+      DB_PASSWORD: payments_pwd
+      DB_NAME: payments
+      HTTP_TIMEOUT_MS: 3000
+      HTTP_MAX_RETRIES: 2
+    depends_on:
+      pg-payments:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      accounts:
+        condition: service_healthy
+      transactions:
+        condition: service_healthy
+    healthcheck: *app-healthcheck
+
+networks:
+  payment-test-net:
+    driver: bridge

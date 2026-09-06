@@ -1,0 +1,124 @@
+import { EventBus } from '@nestjs/cqrs';
+import { Test } from '@nestjs/testing';
+import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
+import { InsufficientBalanceError } from '../../../domain/errors/insufficient-balance.error';
+import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
+import { PaymentDeclinedEvent } from '../../../domain/events/payment-declined.event';
+import { Payment } from '../../../domain/model/payment';
+import { FailureReason, PaymentStatus } from '../../../domain/model/payment-status';
+import { ACCOUNTS_PORT } from '../../../domain/ports/accounts.port';
+import { PAYMENT_REPOSITORY } from '../../../domain/ports/payment.repository';
+import { TRANSACTION_RUNNER } from '../../../domain/ports/transaction-runner.port';
+import {
+  DEBIT,
+  InMemoryPaymentRepository,
+  SOURCE,
+  aPayment,
+  inlineTransaction,
+  movement,
+} from '../../../testing/doubles';
+import { DebitSourceWalletCommand } from '../../commands/debit-source-wallet.command';
+import { DebitSourceWalletHandler } from './debit-source-wallet.handler';
+
+describe('DebitSourceWalletHandler', () => {
+  const accounts = { debit: jest.fn(), credit: jest.fn() };
+  const events = { publishAll: jest.fn() };
+
+  async function handlerFor(stored: Payment | null) {
+    const payments = new InMemoryPaymentRepository(stored);
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        DebitSourceWalletHandler,
+        { provide: PAYMENT_REPOSITORY, useValue: payments },
+        { provide: ACCOUNTS_PORT, useValue: accounts },
+        { provide: TRANSACTION_RUNNER, useValue: inlineTransaction },
+        { provide: EventBus, useValue: events },
+      ],
+    }).compile();
+    return { handler: moduleRef.get(DebitSourceWalletHandler), payments };
+  }
+
+  beforeEach(() => jest.resetAllMocks());
+
+  const command = (payment: Payment) => new DebitSourceWalletCommand(payment.reference.value);
+
+  it('moves to Processing before calling accounts, so a crash leaves a trace', async () => {
+    const payment = aPayment();
+    const { handler, payments } = await handlerFor(payment);
+    accounts.debit.mockImplementation(() => {
+      // Whatever happens next, the payment is already durable as Processing.
+      expect(payments.statuses).toEqual([PaymentStatus.Processing]);
+      return Promise.resolve(movement(DEBIT));
+    });
+
+    const result = await handler.execute(command(payment));
+
+    expect(result).toBe(DEBIT.value);
+    expect(payment.debitTransactionReference?.value).toBe(DEBIT.value);
+  });
+
+  it('debits with the payment reference as the idempotency key', async () => {
+    const payment = aPayment();
+    const { handler } = await handlerFor(payment);
+    accounts.debit.mockResolvedValue(movement(DEBIT));
+
+    await handler.execute(command(payment));
+
+    expect(accounts.debit).toHaveBeenCalledWith(
+      SOURCE,
+      payment.money,
+      payment.reference.value,
+      { description: payment.description, paymentReference: payment.reference },
+    );
+  });
+
+  it('declines and rethrows when accounts refuses the movement', async () => {
+    const payment = aPayment();
+    const { handler, payments } = await handlerFor(payment);
+    accounts.debit.mockRejectedValue(new InsufficientBalanceError(SOURCE.value));
+
+    await expect(handler.execute(command(payment))).rejects.toBeInstanceOf(
+      InsufficientBalanceError,
+    );
+
+    expect(payment.status).toBe(PaymentStatus.Declined);
+    expect(payment.failureReason).toBe(FailureReason.INSUFFICIENT_BALANCE);
+    expect(payments.statuses).toEqual([PaymentStatus.Processing, PaymentStatus.Declined]);
+    // The refusal is persisted first, published second.
+    expect(events.publishAll).toHaveBeenCalledWith([expect.any(PaymentDeclinedEvent)]);
+  });
+
+  it('records an unreachable upstream as a decline of its own kind', async () => {
+    const payment = aPayment();
+    const { handler } = await handlerFor(payment);
+    accounts.debit.mockRejectedValue(new AccountsUnavailableError('debit'));
+
+    await expect(handler.execute(command(payment))).rejects.toBeInstanceOf(
+      AccountsUnavailableError,
+    );
+    expect(payment.failureReason).toBe(FailureReason.ACCOUNTS_UNAVAILABLE);
+  });
+
+  it('lets a non-domain failure through without touching the payment', async () => {
+    const payment = aPayment();
+    const { handler, payments } = await handlerFor(payment);
+    accounts.debit.mockRejectedValue(new Error('the socket is on fire'));
+
+    await expect(handler.execute(command(payment))).rejects.toThrow('the socket is on fire');
+
+    // Still Processing: an unexplained error is not a business outcome, so the
+    // reconciler — not this handler — decides what the payment becomes.
+    expect(payment.status).toBe(PaymentStatus.Processing);
+    expect(payments.statuses).toEqual([PaymentStatus.Processing]);
+    expect(events.publishAll).not.toHaveBeenCalled();
+  });
+
+  it('reports a payment that does not exist', async () => {
+    const { handler } = await handlerFor(null);
+
+    await expect(
+      handler.execute(new DebitSourceWalletCommand('pay_01hq3m8x0000zt7k9d2v4bqf1c')),
+    ).rejects.toBeInstanceOf(PaymentNotFoundError);
+    expect(accounts.debit).not.toHaveBeenCalled();
+  });
+});
