@@ -1,0 +1,1189 @@
+{
+  "info": {
+    "_postman_id": "b7d1f3a2-6c54-4f0b-9a21-3d5e7c9f1a80",
+    "name": "paynad — payment platform",
+    "description": "Every endpoint of the three services, plus a chained scenario that runs a payment from an empty database to a settled ledger.\n\nSelect the **paynad — local** environment first. The stack must be up and migrated: `make up && make migrate && make seed`.\n\nEvery request carries `x-correlation-id`, so one run is one grep across all three services: `docker compose logs | grep $(correlation_id)`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Scenario — one payment, end to end",
+      "description": "Run this folder with the collection runner. Every reference is captured by the request that produced it, so nothing is copied by hand: a user, two wallets, a settled payment, its replay, the ledger catching up, and a payment the balance cannot cover.",
+      "item": [
+        {
+          "name": "1. Create a user",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/users",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "users"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customer_firstname\": \"Awa\",\n  \"customer_lastname\": \"Traoré\",\n  \"customer_email\": \"scenario-{{run_id}}@example.com\",\n  \"customer_phone_number\": \"+2250700000011\",\n  \"customer_city\": \"Abidjan\",\n  \"customer_country\": \"CI\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// One run id ties every fixture and every log line together.",
+                  "pm.environment.set('run_id', Date.now().toString());",
+                  "pm.environment.set('correlation_id', 'postman-' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const envelope = pm.response.json();",
+                  "pm.test('the envelope is well formed', () => {",
+                  "  pm.expect(envelope).to.have.all.keys('code', 'message', 'data');",
+                  "  pm.expect(envelope.code).to.be.a('string');",
+                  "});",
+                  "pm.test('the user is created', () => pm.response.to.have.status(201));",
+                  "const user = pm.response.json().data;",
+                  "pm.expect(user.reference).to.match(/^usr_/);",
+                  "pm.environment.set('user_reference', user.reference);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2. Open the source wallet (500 000)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/accounts",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "accounts"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_reference\": \"{{user_reference}}\",\n  \"currency\": \"XOF\",\n  \"initial_balance\": 500000,\n  \"label\": \"Scenario source {{run_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the wallet is opened', () => pm.response.to.have.status(201));",
+                  "const wallet = pm.response.json().data;",
+                  "pm.expect(wallet.balance).to.eql(500000);",
+                  "pm.environment.set('source_wallet_reference', wallet.reference);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. Open the destination wallet (empty)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/accounts",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "accounts"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_reference\": \"{{user_reference}}\",\n  \"currency\": \"XOF\",\n  \"initial_balance\": 0,\n  \"label\": \"Scenario destination {{run_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const wallet = pm.response.json().data;",
+                  "pm.expect(wallet.balance).to.eql(0);",
+                  "pm.environment.set('destination_wallet_reference', wallet.reference);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. Pay 15 000 from source to destination",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{payments_url}}/payments",
+              "host": [
+                "{{payments_url}}"
+              ],
+              "path": [
+                "payments"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transaction_id\": \"scenario-{{run_id}}\",\n  \"source_wallet_reference\": \"{{source_wallet_reference}}\",\n  \"destination_wallet_reference\": \"{{destination_wallet_reference}}\",\n  \"amount\": 15000,\n  \"currency\": \"XOF\",\n  \"description\": \"Paiement facture avril\",\n  \"lang\": \"fr\",\n  \"metadata\": {\n    \"user_reference\": \"{{user_reference}}\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the payment is created', () => pm.response.to.have.status(201));",
+                  "const payment = pm.response.json().data;",
+                  "pm.test('it settled', () => pm.expect(payment.status).to.eql('Approved'));",
+                  "pm.test('both legs are recorded', () => {",
+                  "  pm.expect(payment.debit_transaction_reference).to.match(/^trx_/);",
+                  "  pm.expect(payment.credit_transaction_reference).to.match(/^trx_/);",
+                  "});",
+                  "pm.expect(payment.failure_reason).to.eql(null);",
+                  "pm.environment.set('payment_reference', payment.reference);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5. Replay the same transaction_id",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{payments_url}}/payments",
+              "host": [
+                "{{payments_url}}"
+              ],
+              "path": [
+                "payments"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transaction_id\": \"scenario-{{run_id}}\",\n  \"source_wallet_reference\": \"{{source_wallet_reference}}\",\n  \"destination_wallet_reference\": \"{{destination_wallet_reference}}\",\n  \"amount\": 15000,\n  \"currency\": \"XOF\",\n  \"description\": \"Paiement facture avril\",\n  \"lang\": \"fr\",\n  \"metadata\": {\n    \"user_reference\": \"{{user_reference}}\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Same key, same body: the stored response comes back and no money moves."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const payment = pm.response.json().data;",
+                  "pm.test('the very same payment is returned', () =>",
+                  "  pm.expect(payment.reference).to.eql(pm.environment.get('payment_reference')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "6. Replay it with a different amount → 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{payments_url}}/payments",
+              "host": [
+                "{{payments_url}}"
+              ],
+              "path": [
+                "payments"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transaction_id\": \"scenario-{{run_id}}\",\n  \"source_wallet_reference\": \"{{source_wallet_reference}}\",\n  \"destination_wallet_reference\": \"{{destination_wallet_reference}}\",\n  \"amount\": 9000,\n  \"currency\": \"XOF\",\n  \"description\": \"Paiement facture avril\",\n  \"lang\": \"fr\",\n  \"metadata\": {\n    \"user_reference\": \"{{user_reference}}\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the caller contradicting itself is a 409', () => pm.response.to.have.status(409));",
+                  "pm.expect(pm.response.json().message).to.eql('IDEMPOTENCY_CONFLICT');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "7. The money moved exactly once — source",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/accounts/{{source_wallet_reference}}/balance",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "accounts",
+                "{{source_wallet_reference}}",
+                "balance"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the source is down 15 000', () =>",
+                  "  pm.expect(pm.response.json().data.balance).to.eql(485000));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "8. The money moved exactly once — destination",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/accounts/{{destination_wallet_reference}}/balance",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "accounts",
+                "{{destination_wallet_reference}}",
+                "balance"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the destination is up 15 000', () =>",
+                  "  pm.expect(pm.response.json().data.balance).to.eql(15000));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "9. The ledger catches up",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{transactions_url}}/transactions?wallet_reference={{source_wallet_reference}}&per_page=20",
+              "host": [
+                "{{transactions_url}}"
+              ],
+              "path": [
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "wallet_reference",
+                  "value": "{{source_wallet_reference}}"
+                },
+                {
+                  "key": "per_page",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "The ledger is fed through the outbox and the broker, so it is eventually consistent. This request waits, then retries itself a few times rather than asserting on a race it would lose."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// The relay drains every two seconds; give it one pass before looking.",
+                  "setTimeout(() => {}, 2500);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const items = pm.response.json().data.items;",
+                  "const debit = items.find((line) =>",
+                  "  line.payment_reference === pm.environment.get('payment_reference') && line.type === 'DEBIT');",
+                  "const attempts = Number(pm.environment.get('ledger_attempts') || 0);",
+                  "if (!debit && attempts < 5) {",
+                  "  pm.environment.set('ledger_attempts', attempts + 1);",
+                  "  postman.setNextRequest('9. The ledger catches up');",
+                  "} else {",
+                  "  pm.environment.unset('ledger_attempts');",
+                  "  pm.test('the debit reached the ledger', () => pm.expect(debit).to.not.be.undefined);",
+                  "  pm.test('it is journalised as a DEBIT of 15 000', () => {",
+                  "    pm.expect(debit.type).to.eql('DEBIT');",
+                  "    pm.expect(debit.amount).to.eql(15000);",
+                  "  });",
+                  "  pm.environment.set('transaction_reference', debit.reference);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "10. A payment the balance cannot cover",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{payments_url}}/payments",
+              "host": [
+                "{{payments_url}}"
+              ],
+              "path": [
+                "payments"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transaction_id\": \"scenario-{{run_id}}-short\",\n  \"source_wallet_reference\": \"{{destination_wallet_reference}}\",\n  \"destination_wallet_reference\": \"{{source_wallet_reference}}\",\n  \"amount\": 1000000,\n  \"currency\": \"XOF\",\n  \"description\": \"Paiement trop grand\",\n  \"lang\": \"fr\",\n  \"metadata\": {\n    \"user_reference\": \"{{user_reference}}\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "A refusal is still a payment: 201 with status Declined, so the caller keeps a reference to reconcile with. Nothing moved and nothing is journalised."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('a refusal is still a resource', () => pm.response.to.have.status(201));",
+                  "const payment = pm.response.json().data;",
+                  "pm.test('it is declined, not errored', () => {",
+                  "  pm.expect(payment.status).to.eql('Declined');",
+                  "  pm.expect(payment.failure_reason).to.eql('INSUFFICIENT_BALANCE');",
+                  "  pm.expect(payment.debit_transaction_reference).to.eql(null);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "11. Read the settled payment back",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{payments_url}}/payments/{{payment_reference}}",
+              "host": [
+                "{{payments_url}}"
+              ],
+              "path": [
+                "payments",
+                "{{payment_reference}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the projection agrees with the command', () => {",
+                  "  const payment = pm.response.json().data;",
+                  "  pm.expect(payment.reference).to.eql(pm.environment.get('payment_reference'));",
+                  "  pm.expect(payment.status).to.eql('Approved');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "description": "One probe per service. `payments` also reports the outbox depth.",
+      "item": [
+        {
+          "name": "accounts",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/health",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const envelope = pm.response.json();",
+                  "pm.test('the envelope is well formed', () => {",
+                  "  pm.expect(envelope).to.have.all.keys('code', 'message', 'data');",
+                  "  pm.expect(envelope.code).to.be.a('string');",
+                  "});",
+                  "pm.test('accounts is up', () => pm.expect(pm.response.json().data.status).to.eql('Healthy'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "transactions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{transactions_url}}/health",
+              "host": [
+                "{{transactions_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          }
+        },
+        {
+          "name": "payments",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{payments_url}}/health",
+              "host": [
+                "{{payments_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the outbox is draining', () =>",
+                  "  pm.expect(pm.response.json().data.outbox_pending).to.be.at.most(50));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "accounts",
+      "description": "Users, wallets and the two guarded endpoints that move money.",
+      "item": [
+        {
+          "name": "Create a user",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/users",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "users"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customer_firstname\": \"Awa\",\n  \"customer_lastname\": \"Traoré\",\n  \"customer_email\": \"awa.{{$timestamp}}@example.com\",\n  \"customer_phone_number\": \"+2250700000010\",\n  \"customer_city\": \"Abidjan\",\n  \"customer_country\": \"CI\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Read a user",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/users/{{user_reference}}",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_reference}}"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Open a wallet",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/accounts",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "accounts"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_reference\": \"{{user_reference}}\",\n  \"currency\": \"XOF\",\n  \"initial_balance\": 500000,\n  \"label\": \"Compte principal\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "An opening balance is a movement like any other, so it gets its own ledger row."
+          }
+        },
+        {
+          "name": "Read a balance",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/accounts/{{source_wallet_reference}}/balance",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "accounts",
+                "{{source_wallet_reference}}",
+                "balance"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Debit a wallet [internal]",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              },
+              {
+                "key": "x-api-key",
+                "value": "{{internal_api_key}}"
+              },
+              {
+                "key": "x-api-secret",
+                "value": "{{internal_api_secret}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/accounts/{{source_wallet_reference}}/debit",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "accounts",
+                "{{source_wallet_reference}}",
+                "debit"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transaction_id\": \"postman-debit-{{$timestamp}}\",\n  \"amount\": 5000,\n  \"currency\": \"XOF\",\n  \"description\": \"Debit direct\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Idempotent on (wallet, transaction_id). Replaying the key returns the original movement; replaying it with a different body is a 409."
+          }
+        },
+        {
+          "name": "Credit a wallet [internal]",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              },
+              {
+                "key": "x-api-key",
+                "value": "{{internal_api_key}}"
+              },
+              {
+                "key": "x-api-secret",
+                "value": "{{internal_api_secret}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/accounts/{{source_wallet_reference}}/credit",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "accounts",
+                "{{source_wallet_reference}}",
+                "credit"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transaction_id\": \"postman-credit-{{$timestamp}}\",\n  \"amount\": 5000,\n  \"currency\": \"XOF\",\n  \"description\": \"Credit direct\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Debit without credentials → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{accounts_url}}/accounts/{{source_wallet_reference}}/debit",
+              "host": [
+                "{{accounts_url}}"
+              ],
+              "path": [
+                "accounts",
+                "{{source_wallet_reference}}",
+                "debit"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transaction_id\": \"postman-unauthorised-{{$timestamp}}\",\n  \"amount\": 5000,\n  \"currency\": \"XOF\",\n  \"description\": \"No key\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the guard refuses it', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "transactions",
+      "description": "The append-only ledger. The queue is the front door; this POST is the fallback.",
+      "item": [
+        {
+          "name": "Record a movement",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{transactions_url}}/transactions",
+              "host": [
+                "{{transactions_url}}"
+              ],
+              "path": [
+                "transactions"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transaction_id\": \"postman-movement-{{$timestamp}}\",\n  \"payment_reference\": \"{{payment_reference}}\",\n  \"type\": \"DEBIT\",\n  \"wallet_reference\": \"{{source_wallet_reference}}\",\n  \"user_reference\": \"{{user_reference}}\",\n  \"amount\": 5000,\n  \"currency\": \"XOF\",\n  \"description\": \"Mouvement manuel\",\n  \"status\": \"Approved\",\n  \"occurred_at\": \"2026-09-06T10:15:00.000Z\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "201 on a fresh append, 200 with the stored row on a replay."
+          }
+        },
+        {
+          "name": "History by wallet",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{transactions_url}}/transactions?wallet_reference={{source_wallet_reference}}&per_page=20",
+              "host": [
+                "{{transactions_url}}"
+              ],
+              "path": [
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "wallet_reference",
+                  "value": "{{source_wallet_reference}}"
+                },
+                {
+                  "key": "per_page",
+                  "value": "20"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "History by user",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{transactions_url}}/transactions?user_reference={{user_reference}}&type=DEBIT",
+              "host": [
+                "{{transactions_url}}"
+              ],
+              "path": [
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "user_reference",
+                  "value": "{{user_reference}}"
+                },
+                {
+                  "key": "type",
+                  "value": "DEBIT"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "History with no scope → 422",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{transactions_url}}/transactions",
+              "host": [
+                "{{transactions_url}}"
+              ],
+              "path": [
+                "transactions"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the ledger is never scanned whole', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read one movement",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{transactions_url}}/transactions/{{transaction_reference}}",
+              "host": [
+                "{{transactions_url}}"
+              ],
+              "path": [
+                "transactions",
+                "{{transaction_reference}}"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "payments",
+      "description": "The saga's public surface.",
+      "item": [
+        {
+          "name": "Initiate a payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "content-type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{payments_url}}/payments",
+              "host": [
+                "{{payments_url}}"
+              ],
+              "path": [
+                "payments"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transaction_id\": \"postman-payment-{{$timestamp}}\",\n  \"source_wallet_reference\": \"{{source_wallet_reference}}\",\n  \"destination_wallet_reference\": \"{{destination_wallet_reference}}\",\n  \"amount\": 15000,\n  \"currency\": \"XOF\",\n  \"description\": \"Paiement facture avril\",\n  \"lang\": \"fr\",\n  \"metadata\": {\n    \"user_reference\": \"{{user_reference}}\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "transaction_id is yours and is the idempotency key; reference comes back from the server."
+          }
+        },
+        {
+          "name": "Read a payment",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{payments_url}}/payments/{{payment_reference}}",
+              "host": [
+                "{{payments_url}}"
+              ],
+              "path": [
+                "payments",
+                "{{payment_reference}}"
+              ]
+            }
+          }
+        },
+        {
+          "name": "List payments",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "x-correlation-id",
+                "value": "{{correlation_id}}"
+              }
+            ],
+            "url": {
+              "raw": "{{payments_url}}/payments?status=Approved&page=1&per_page=20",
+              "host": [
+                "{{payments_url}}"
+              ],
+              "path": [
+                "payments"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "Approved"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "per_page",
+                  "value": "20"
+                },
+                {
+                  "key": "source_wallet_reference",
+                  "value": "{{source_wallet_reference}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Requests are readable on their own: nothing here mutates state.",
+          "if (!pm.environment.get('correlation_id')) {",
+          "  pm.environment.set('correlation_id', 'postman-' + Date.now());",
+          "}"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('the response is enveloped', () => {",
+          "  const body = pm.response.json();",
+          "  pm.expect(body).to.have.property('code');",
+          "  pm.expect(body).to.have.property('message');",
+          "  pm.expect(body).to.have.property('data');",
+          "});"
+        ]
+      }
+    }
+  ]
+}

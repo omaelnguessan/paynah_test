@@ -1,0 +1,1022 @@
+# paynad — mini-plateforme de paiement
+
+Trois microservices NestJS indépendants, une base PostgreSQL chacun, reliés par
+du REST synchrone pour le mouvement d'argent et par RabbitMQ pour le ledger.
+L'ensemble tourne en local avec Docker Compose.
+
+```mermaid
+flowchart TB
+    client([Client])
+
+    subgraph payments_svc["payments :3003 — orchestrateur de saga, CQRS"]
+        payments["POST /payments<br/>GET /payments/:reference"]
+        outbox[("outbox")]
+        relay["OutboxRelay @Cron 2 s"]
+    end
+
+    subgraph accounts_svc["accounts :3001 — seul service qui écrit un solde"]
+        accounts["POST /accounts/:ref/debit<br/>POST /accounts/:ref/credit"]
+    end
+
+    subgraph transactions_svc["transactions :3002 — ledger append-only"]
+        transactions["payment.transaction.recorded<br/>GET /transactions"]
+    end
+
+    pgp[("pg-payments")]
+    pga[("pg-accounts")]
+    pgt[("pg-transactions")]
+    mq{{"RabbitMQ"}}
+
+    client -->|HTTP| payments
+    payments -->|"REST synchrone<br/>x-api-key + clé d'idempotence"| accounts
+    payments --- pgp
+    payments -.->|"même transaction"| outbox
+    outbox --> relay
+    relay -->|"AMQP, au moins une fois"| mq
+    mq --> transactions
+    accounts --- pga
+    transactions --- pgt
+```
+
+`payments` débite et crédite via `accounts` en REST, puis notifie `transactions`
+de façon asynchrone. Un débit refusé n'atteint jamais le ledger ; un crédit qui
+échoue est compensé par la saga.
+
+## Prérequis
+
+Docker avec Compose v2 suffit à faire tourner la stack. L'outillage côté machine
+(IDE, tests) demande Node 20+ et **pnpm 9** :
+`corepack enable && corepack prepare pnpm@9 --activate`, ou `npx pnpm@9 install`.
+pnpm 7 plante sur les versions récentes de Node avec `ERR_INVALID_THIS`.
+
+## Démarrage rapide
+
+```bash
+cp .env.example .env      # ou laissez `make up` s'en charger
+make up                   # construit les images, démarre tout, attend la santé
+make migrate              # applique les migrations TypeORM des trois bases
+make seed                 # charge les jeux de données de développement
+```
+
+`make up && make migrate && make seed` : c'est tout ce dont un clone frais a besoin.
+
+| Surface           | URL                              |
+|-------------------|----------------------------------|
+| docs accounts     | http://localhost:3001/docs       |
+| docs transactions | http://localhost:3002/docs       |
+| docs payments     | http://localhost:3003/docs       |
+| interface RabbitMQ| http://localhost:15672           |
+
+Les bases sont exposées sur 5433 (accounts), 5434 (transactions) et 5435
+(payments) pour inspection ; `make psql SERVICE=accounts` ouvre un shell sur
+l'une d'elles.
+
+`make help` affiche la liste complète des cibles.
+
+Le seed est idempotent, indexé sur l'email du client et le libellé du wallet :
+`make seed` peut être relancé à volonté sans dupliquer une ligne ni recréditer
+un wallet. Il charge **trois utilisateurs et cinq wallets** aux soldes
+volontairement variés :
+
+| Utilisateur | Wallet | Solde | Statut | À quoi il sert |
+|-------------|--------|-------|--------|----------------|
+| Awa Traoré | Compte principal | 500 000 | Active | la source approvisionnée du paiement de démonstration |
+| Awa Traoré | Compte épargne | 0 | Active | un wallet vide, pour le chemin `INSUFFICIENT_BALANCE` |
+| Kofi Mensah | Compte principal | 25 000 | Active | un solde modeste, qu'un paiement peut épuiser |
+| Kofi Mensah | Compte marchand | 75 000 | Active | la destination du paiement de démonstration |
+| Salif Diallo | Compte bloqué | 10 000 | Frozen | le chemin `WALLET_FROZEN`, et le cas de compensation |
+
+`transactions` et `payments` chargent leur propre historique : un débit, le
+remboursement qui le compense, un crédit, et un paiement par état terminal. Les
+paiements du seed sont construits en faisant traverser à l'agrégat des
+transitions légales plutôt qu'en insérant des lignes ; un jeu de données que la
+machine à états refuserait est un jeu de données qui ment.
+
+## Environnement
+
+Rien n'est codé en dur : `docker-compose.yml` lit chaque valeur dans `.env`, et
+chaque service valide son propre environnement au démarrage avec
+`class-validator`. Un mot de passe manquant ou une URL amont à moitié définie
+arrête le processus, au lieu de produire un conteneur qui démarre puis échoue à
+la première requête.
+
+| Variable | Défaut dans `.env.example` | Utilisée par |
+|----------|----------------------------|--------------|
+| `COMPOSE_PROJECT_NAME` | `paynad` | compose |
+| `NODE_ENV`, `LOG_LEVEL`, `DB_LOGGING` | `development`, `debug`, `false` | les trois services |
+| `POSTGRES_VERSION`, `RABBITMQ_VERSION` | `16-alpine`, `3.13-management-alpine` | compose |
+| `<SERVICE>_DB_NAME` / `_USER` / `_PASSWORD` | propre à chaque service | ce service uniquement |
+| `<SERVICE>_DB_HOST` / `_PORT` | `pg-<service>` / `5432` | ce service uniquement |
+| `<SERVICE>_DB_EXPOSED_PORT` | `5433` / `5434` / `5435` | inspection depuis la machine |
+| `RABBITMQ_USER` / `_PASSWORD` / `_VHOST` / `_HOST` / `_PORT` | `paynad` / … / `/` / `rabbitmq` / `5672` | payments, transactions |
+| `RABBITMQ_EXPOSED_PORT`, `RABBITMQ_MANAGEMENT_PORT` | `5672`, `15672` | machine hôte |
+| `INTERNAL_API_KEY` (16 caractères minimum) | `dev-internal-key-change-me` | guard d'`accounts`, envoyée par `payments` |
+| `INTERNAL_API_SECRET` (32 caractères minimum) | `dev-internal-secret-…` | idem |
+| `ACCOUNTS_PORT` / `TRANSACTIONS_PORT` / `PAYMENTS_PORT` | `3001` / `3002` / `3003` | les applications |
+| `<SERVICE>_DEBUG_PORT` | `9229` / `9230` / `9231` | couche de développement |
+| `ACCOUNTS_SERVICE_URL` | `http://accounts:3001` | payments |
+| `TRANSACTIONS_SERVICE_URL` | `http://transactions:3002` | payments |
+| `HTTP_TIMEOUT_MS` | `3000` | payments vers accounts |
+| `HTTP_MAX_RETRIES` | `2` | payments vers accounts |
+
+Les deux identifiants internes sont les seuls secrets du système, ils
+n'apparaissent jamais dans le code, et ils protègent les endpoints de débit et
+de crédit. Générez les vôtres avant que quoi que ce soit ne quitte une machine :
+`openssl rand -hex 24`.
+
+## Organisation
+
+```
+packages/shared/          enveloppe de réponse, enums, décorateurs de validation, contrats d'événements
+services/accounts/        utilisateurs, wallets, crédit et débit
+services/transactions/    ledger append-only, historique paginé
+services/payments/        saga de paiement, architecture propre et CQRS
+postman/                  collection et environnement, avec un scénario enchaîné
+DECISIONS.md              pourquoi la conception a pris cette direction
+docker-compose.yml        stack au format production
+docker-compose.override.yml   couche de développement : montages, hot reload, debuggers
+docker-compose.test.yml   stack e2e isolée : bases éphémères, aucun port publié
+```
+
+Chaque service possède sa base de façon exclusive. Aucun service ne lit les
+tables d'un autre ; les seuls passages d'une frontière sont REST et AMQP.
+
+## Développement
+
+`docker compose` prend automatiquement `docker-compose.override.yml`, donc
+`make up` donne déjà le rechargement à chaud. Dans chaque conteneur de
+développement, deux compilateurs tournent en watch, celui du service et celui de
+`packages/shared`, et le processus lui-même tourne sous `node --watch`, qui
+redémarre dès qu'un fichier qu'il a chargé change. C'est pour cela qu'une
+modification dans `packages/shared` recharge les trois services, ce que le
+`--watch` de Nest ne sait pas faire puisqu'il ne suit que les sources du service.
+
+Les debuggers Node sont attachés aux ports 9229 (accounts), 9230 (transactions)
+et 9231 (payments). Sous VS Code : « Attach to Node » sur le port correspondant.
+
+Pour une image conforme à la production :
+
+```bash
+docker compose -f docker-compose.yml up -d --build
+```
+
+L'outillage local (IDE, tests unitaires) demande un `pnpm install`, soit
+`make install`.
+
+```bash
+make test               # tests unitaires, sur la machine
+make test-cov           # les mêmes, avec couverture et plancher appliqué
+make test:e2e           # bout en bout, dans la stack déjà démarrée
+make test:e2e-isolated  # bout en bout, sur une stack jetable qu'il construit
+make lint
+```
+
+Les suites de bout en bout tournent dans les conteneurs à dessein : ce qu'elles
+exercent, l'idempotence, l'UPDATE conditionnel du solde, le trigger append-only,
+vit dans PostgreSQL. Simuler la base ne testerait rien. `make test:e2e` a besoin
+de la stack démarrée et migrée ; `make test:e2e-isolated` amène la sienne.
+
+### La pyramide de tests
+
+| Niveau | Où | Ce que ça prouve | Coût |
+|--------|----|------------------|------|
+| Unitaire | `src/domain`, `src/application` | la machine à états, les règles sur l'argent, chaque branche de la saga | aucune E/S |
+| Intégration | `src/infrastructure/http` + `nock` | retries, timeouts, circuit breaker, traduction des 4xx | aucun réseau |
+| Bout en bout | les trois services + PostgreSQL + RabbitMQ | ce qui survit à une frontière | la stack entière |
+
+`services/payments` impose un plancher de **80 % d'instructions, de branches, de
+fonctions et de lignes sur `domain/` et `application/`** via `coverageThreshold` ;
+la suite se situe aujourd'hui près de 99 % d'instructions sur les deux. Les
+barils de réexport et les doublures de test sont exclus : ils gonflent un
+chiffre sans rien dire du code testé.
+
+La couche d'intégration utilise `nock` plutôt qu'un client bouchonné, donc le
+vrai pipeline axios, le vrai opérateur `timeout()` et le vrai breaker sont
+exercés. Un 503 est réessayé et passe au second essai, un 422 n'est jamais
+réessayé, un timeout épuisé arrive sous la forme d'un `AccountsUnavailableError`,
+le circuit s'ouvre après N échecs consécutifs puis échoue immédiatement, et une
+rafale de refus ne l'ouvre jamais, parce qu'un refus signifie qu'`accounts` est
+debout et répond.
+
+Cinq scénarios de bout en bout portent l'essentiel :
+
+1. **Un paiement aboutit** : les deux soldes bougent, le paiement est `Approved`,
+   et exactement deux lignes atteignent le ledger, une par wallet.
+2. **Le solde est insuffisant** : le paiement est `Declined` avec
+   `INSUFFICIENT_BALANCE`, la source est intacte, et **aucune** ligne n'est
+   écrite au ledger ; le même refus à la frontière d'`accounts` répond 422.
+3. **Deux fois le même `transaction_id`** : une seule référence, un seul débit au
+   ledger, et le rejeu renvoie la première réponse à l'octet près.
+4. **L'aval est indisponible** : `accounts.credit` est bouchonné en timeout
+   *après* un vrai débit ; la source est rétablie, le paiement passe
+   `Compensated`, et une ligne `REFUND` est journalisée.
+5. **Dix paiements se disputent de quoi en couvrir six** : exactement six
+   `Approved`, quatre `Declined`, le wallet finit à zéro, six débits distincts au
+   ledger, et pas un solde négatif en chemin.
+
+Les assertions sur le ledger interrogent en boucle plutôt que d'attendre : les
+mouvements atteignent `transactions` par l'outbox et le broker, donc le chemin
+est cohérent à terme par construction, et une attente fixe serait instable,
+lente, ou les deux.
+
+`docker-compose.test.yml` est la stack isolée : son propre projet compose, son
+propre réseau, aucun port publié, et trois bases plus un broker dont l'état vit
+en `tmpfs`. Chaque exécution part donc de schémas vides et ne laisse rien
+derrière elle, et elle peut tourner à côté de `make up`, ou en CI, sans conflit.
+
+### Migrations
+
+Le schéma ne bouge que par migrations ; `synchronize` est désactivé partout.
+
+```bash
+make migrate                                  # applique les migrations en attente, tous services
+make migration-revert SERVICE=accounts        # annule la dernière
+docker compose exec accounts sh -lc \
+  'cd /app/services/accounts && pnpm typeorm migration:generate src/database/migrations/AddX'
+```
+
+## Contrat d'API
+
+Toute réponse HTTP, succès comme erreur, a exactement cette forme :
+
+```json
+{ "code": "200", "message": "SUCCESS", "data": { } }
+```
+
+- `code` est le code **applicatif**, porté comme une chaîne et volontairement
+  découplé du statut HTTP (`"4001"` pour un solde insuffisant, qui voyage sur un
+  422).
+- `message` est un `ResponseMessage` en majuscules, lisible par une machine. Il
+  ne duplique jamais le `status` d'une ressource.
+- `data` est la charge utile, ou un `null` explicite.
+
+Un échec de validation liste tous les champs fautifs :
+
+```json
+{
+  "code": "4000",
+  "message": "VALIDATION_FAILED",
+  "data": [
+    { "field": "amount", "errors": ["amount must be an integer between 5 and 1000000000000, multiple of 5"] },
+    { "field": "currency", "errors": ["currency must be one of: XOF"] }
+  ]
+}
+```
+
+Rien n'échappe à l'enveloppe : `ResponseInterceptor` emballe la valeur de retour
+de chaque handler et `AllExceptionsFilter` attrape tout le reste, y compris les
+routes inconnues et les exceptions imprévues, dont les détails sont journalisés
+et jamais renvoyés.
+
+### Conventions de payload
+
+| Règle | Détail |
+|-------|--------|
+| Forme | Plate, `snake_case`, aucun objet imbriqué |
+| Champs optionnels | Un `null` explicite est accepté exactement comme un champ absent |
+| `amount` | Entier dans la plus petite unité monétaire, ≥ 5, multiple de 5. Jamais un flottant, jamais une chaîne numérique |
+| `currency` | Chaîne de 3 caractères issue de `Currency` (`XOF`) |
+| `description` | Expression régulière en liste blanche ; `# / $ _ &` sont refusés |
+| `transaction_id` | Fourni **par l'appelant**, sert de clé d'idempotence |
+| `reference` | Générée **par le serveur**, préfixée `usr_` / `wlt_` / `pay_` / `trx_`. C'est avec elle qu'on interroge ensuite |
+| Dates | ISO 8601 UTC |
+| `status` | Capitalisé (`Pending`, `Approved`, `Declined`) |
+
+Les deux identifiants sont distincts à dessein. `transaction_id` permet à un
+appelant de réessayer sans risque : rejoué avec le même corps il renvoie
+`DUPLICATE_TRANSACTION`, rejoué avec un corps différent il renvoie
+`IDEMPOTENCY_CONFLICT`.
+
+Les références portent un corps de type ULID en base32 de Crockford, ordonné
+dans le temps et débarrassé des caractères ambigus `i`, `l`, `o` et `u`. Elles se
+trient donc chronologiquement dans un index et restent lisibles au téléphone.
+
+### Codes applicatifs
+
+| Code | `message` | HTTP |
+|------|-----------|------|
+| `200` / `201` | `SUCCESS` / `CREATED` | 200 / 201 |
+| `4000` | `VALIDATION_FAILED` | 400 (et 401 sur les endpoints internes) |
+| `4001` | `INSUFFICIENT_BALANCE` | 422 |
+| `4002` | `USER_NOT_FOUND` | 404 |
+| `4003` | `WALLET_NOT_FOUND` | 404 |
+| `4008` | `TRANSACTION_NOT_FOUND` | 404 |
+| `4004` | `WALLET_FROZEN` | 422 |
+| `4005` | `CURRENCY_MISMATCH` | 422 |
+| `4006` | `DUPLICATE_TRANSACTION` | 409 |
+| `4007` | `IDEMPOTENCY_CONFLICT` | 409 |
+| `5000` | `INTERNAL_ERROR` | 500 |
+| `5001` | `UPSTREAM_UNAVAILABLE` | 503 |
+
+Un refus métier est un 422, pas un 409 : la requête était bien formée et le
+domaine l'a refusée. Le 409 est réservé à un appelant qui se contredit, ce
+qu'est précisément un conflit d'idempotence. `VALIDATION_FAILED` sert aussi de
+catégorie générique pour les fautes de l'appelant : une `x-api-key` rejetée, une
+route inconnue et un historique sans périmètre y atterrissent tous. Le statut
+HTTP les distingue, et aucun ne laisse fuir de détail.
+
+Les payloads paginés sont uniformes d'un service à l'autre :
+
+```json
+{ "items": [], "page": 1, "per_page": 20, "total": 137, "has_next": true }
+```
+
+`has_next` plutôt qu'un nombre de pages : c'est tout ce dont un appelant a besoin
+pour continuer à paginer, et cela reste juste pendant que des lignes s'ajoutent
+en dessous.
+
+### Décorateurs de validation réutilisables
+
+`packages/shared` expose le contrat sous forme de décorateurs plutôt qu'en
+prose, de sorte qu'un DTO ne puisse pas s'en écarter :
+
+```ts
+class CreatePaymentDto {
+  @IsTransactionId() transaction_id: string;
+  @IsReference(ReferencePrefix.WALLET) source_wallet_reference: string;
+  @IsAmount() amount: number;
+  @IsCurrency() currency: Currency;
+  @IsSafeDescription() description?: string | null;
+}
+```
+
+Chacun se documente aussi dans Swagger, si bien que le schéma OpenAPI et la
+validation à l'exécution ne peuvent jamais diverger.
+
+## L'API par l'exemple
+
+Tous les appels ci-dessous tournent après `make up && make migrate && make seed`.
+La séquence complète est aussi dans `postman/` sous forme de collection
+enchaînée, voir [Postman](#postman).
+
+```bash
+ACCOUNTS=http://localhost:3001
+TRANSACTIONS=http://localhost:3002
+PAYMENTS=http://localhost:3003
+KEY=dev-internal-key-change-me
+SECRET=dev-internal-secret-change-me-0123456789
+```
+
+### Santé, sur les trois services
+
+```bash
+curl -s $ACCOUNTS/health
+```
+
+```json
+{
+  "code": "200",
+  "message": "SUCCESS",
+  "data": {
+    "service": "accounts",
+    "status": "Healthy",
+    "database": "up",
+    "uptime_seconds": 42,
+    "checked_at": "2026-09-06T10:15:00.000Z"
+  }
+}
+```
+
+`payments` ajoute `outbox_pending` : un nombre qui ne cesse de monter signale que
+le relais ou le broker est en difficulté. Un service qui n'atteint plus sa base
+répond `"status": "Degraded"` avec `"database": "down"`.
+
+### `accounts` : créer un utilisateur
+
+```bash
+curl -s -X POST $ACCOUNTS/users \
+  -H 'content-type: application/json' \
+  -d '{
+    "customer_firstname": "Awa",
+    "customer_lastname": "Traoré",
+    "customer_email": "awa.demo@example.com",
+    "customer_phone_number": "+2250700000010",
+    "customer_city": "Abidjan",
+    "customer_country": "CI"
+  }'
+```
+
+```json
+{ "code": "201", "message": "CREATED", "data": { "reference": "usr_01hq3m8x0000zt7k9d2v4bqf1c", "customer_email": "awa.demo@example.com" } }
+```
+
+Gardez la `reference` : c'est elle qu'utilisent tous les appels suivants.
+
+```bash
+USER=usr_01hq3m8x0000zt7k9d2v4bqf1c
+curl -s $ACCOUNTS/users/$USER
+```
+
+### `accounts` : ouvrir deux wallets
+
+```bash
+curl -s -X POST $ACCOUNTS/accounts \
+  -H 'content-type: application/json' \
+  -d '{ "user_reference": "'$USER'", "currency": "XOF", "initial_balance": 500000, "label": "Compte principal" }'
+
+curl -s -X POST $ACCOUNTS/accounts \
+  -H 'content-type: application/json' \
+  -d '{ "user_reference": "'$USER'", "currency": "XOF", "initial_balance": 0, "label": "Compte marchand" }'
+```
+
+Un solde d'ouverture est un mouvement comme un autre : il a donc sa propre ligne
+au ledger.
+
+```bash
+SOURCE=wlt_01hq3m8x0000zt7k9d2v4bqf1c
+DESTINATION=wlt_01hq3m8x0000zt7k9d2v4bqf9z
+curl -s $ACCOUNTS/accounts/$SOURCE/balance
+```
+
+```json
+{ "code": "200", "message": "SUCCESS", "data": { "reference": "wlt_…", "balance": 500000, "currency": "XOF", "status": "Active" } }
+```
+
+### `accounts` : débit et crédit (internes, protégés)
+
+Ces deux endpoints sont les seuls qui déplacent de l'argent, et les seuls
+derrière le guard. Leur appelant normal est `payments` ; les identifiants sont
+internes.
+
+```bash
+curl -s -X POST $ACCOUNTS/accounts/$SOURCE/debit \
+  -H 'content-type: application/json' \
+  -H "x-api-key: $KEY" -H "x-api-secret: $SECRET" \
+  -d '{ "transaction_id": "demo-debit-0001", "amount": 15000, "currency": "XOF", "description": "Paiement facture avril" }'
+```
+
+```json
+{
+  "code": "200",
+  "message": "SUCCESS",
+  "data": {
+    "transaction_id": "demo-debit-0001",
+    "reference": "trx_01hq3m8x0000zt7k9d2v4bqf1c",
+    "amount": 15000,
+    "balance_before": 500000,
+    "balance_after": 485000,
+    "status": "Approved",
+    "declined_reason": null
+  }
+}
+```
+
+Rejouez exactement le même appel : la réponse est identique à l'octet près et le
+solde ne bouge pas une seconde fois. Rejouez-le avec un montant différent et
+c'est un 409 `IDEMPOTENCY_CONFLICT`, puisque la clé se contredit. Demandez plus
+que ce que le wallet contient et c'est un 422 `INSUFFICIENT_BALANCE`, avec
+l'opération refusée dans `data` et rien d'écrit.
+
+Sans les identifiants :
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $ACCOUNTS/accounts/$SOURCE/debit \
+  -H 'content-type: application/json' \
+  -d '{ "transaction_id": "demo-debit-0002", "amount": 5000, "currency": "XOF", "description": "No key" }'
+# 401
+```
+
+`credit` est le même appel avec l'autre verbe dans le chemin.
+
+### `payments` : lancer un paiement
+
+Le seul endpoint dont un client a réellement besoin. `transaction_id` est le
+vôtre et sert de clé d'idempotence ; `reference` revient du serveur.
+
+```bash
+curl -s -X POST $PAYMENTS/payments \
+  -H 'content-type: application/json' \
+  -H 'x-correlation-id: demo-trace-0001' \
+  -d '{
+    "transaction_id": "demo-payment-0001",
+    "source_wallet_reference": "'$SOURCE'",
+    "destination_wallet_reference": "'$DESTINATION'",
+    "amount": 15000,
+    "currency": "XOF",
+    "description": "Paiement facture avril",
+    "lang": "fr",
+    "metadata": { "user_reference": "'$USER'" }
+  }'
+```
+
+```json
+{
+  "code": "201",
+  "message": "CREATED",
+  "data": {
+    "reference": "pay_01hq3m8x0000zt7k9d2v4bqf1c",
+    "transaction_id": "demo-payment-0001",
+    "amount": 15000,
+    "currency": "XOF",
+    "status": "Approved",
+    "failure_reason": null,
+    "debit_transaction_reference": "trx_…",
+    "credit_transaction_reference": "trx_…",
+    "completed_at": "2026-09-06T10:15:02.412Z"
+  }
+}
+```
+
+Un paiement que la source ne peut pas couvrir répond **201 avec
+`status: "Declined"`** et `failure_reason: "INSUFFICIENT_BALANCE"`, et non une
+enveloppe d'erreur : la ressource paiement existe, et l'appelant a besoin de sa
+référence pour rapprocher plus tard. Renvoyer le même `transaction_id` retourne
+ce même paiement ; l'envoyer avec un corps différent retourne un 409
+`IDEMPOTENCY_CONFLICT`.
+
+### `payments` : lire un paiement, lister les autres
+
+```bash
+PAYMENT=pay_01hq3m8x0000zt7k9d2v4bqf1c
+curl -s $PAYMENTS/payments/$PAYMENT
+curl -s "$PAYMENTS/payments?status=Approved&source_wallet_reference=$SOURCE&page=1&per_page=20"
+```
+
+```json
+{ "code": "200", "message": "SUCCESS", "data": { "items": [], "page": 1, "per_page": 20, "total": 137, "has_next": true } }
+```
+
+Le côté lecture n'hydrate jamais l'agrégat : il interroge une projection.
+
+### `transactions` : le ledger
+
+Le ledger est normalement alimenté par le broker, une poignée de secondes après
+que le paiement a abouti. On le relit par wallet ou par utilisateur, jamais sans
+périmètre :
+
+```bash
+curl -s "$TRANSACTIONS/transactions?wallet_reference=$SOURCE&per_page=20"
+curl -s "$TRANSACTIONS/transactions?user_reference=$USER&type=DEBIT"
+curl -s $TRANSACTIONS/transactions/trx_01hq3m8x0000zt7k9d2v4bqf1c
+```
+
+Le `POST` HTTP existe comme repli de l'événement, et partage son DTO :
+
+```bash
+curl -s -X POST $TRANSACTIONS/transactions \
+  -H 'content-type: application/json' \
+  -d '{
+    "transaction_id": "demo-movement-0001",
+    "payment_reference": "'$PAYMENT'",
+    "type": "DEBIT",
+    "wallet_reference": "'$SOURCE'",
+    "user_reference": "'$USER'",
+    "amount": 15000,
+    "currency": "XOF",
+    "description": "Paiement facture avril",
+    "status": "Approved",
+    "occurred_at": "2026-09-06T10:15:00.000Z"
+  }'
+```
+
+Un ajout inédit répond 201 ; rejouer le même `transaction_id` répond **200** avec
+la ligne stockée, inchangée.
+
+### Suivre le tout de bout en bout
+
+```bash
+docker compose logs | grep demo-trace-0001
+```
+
+Un seul `correlation_id` traverse les trois services, voir
+[Suivre un paiement à travers les trois services](#suivre-un-paiement-à-travers-les-trois-services).
+
+## Postman
+
+`postman/` contient une collection et un environnement :
+
+```
+postman/paynad.postman_collection.json     tous les endpoints, plus le scénario complet
+postman/paynad.postman_environment.json    URL de base et identifiants internes
+```
+
+Importez les deux, sélectionnez l'environnement **paynad — local**, puis lancez
+`Run collection` sur le dossier **Scenario**. Sans interface, c'est une commande :
+
+```bash
+npx newman run postman/paynad.postman_collection.json \
+  -e postman/paynad.postman_environment.json
+# 29 requêtes, 49 assertions, 0 échec
+```
+
+Le scénario crée un utilisateur, ouvre un wallet approvisionné et un wallet vide,
+règle un paiement, le rejoue pour montrer la réponse idempotente, le rejoue une
+troisième fois avec un montant différent pour montrer le 409, vérifie les deux
+soldes, attend que le ledger rattrape son retard, et finit par un paiement que le
+solde ne peut pas couvrir. Chaque référence est capturée dans une variable
+d'environnement par la requête qui l'a produite : rien n'est à recopier à la main.
+
+## `accounts`
+
+| Méthode | Route | |
+|---------|-------|--|
+| POST | `/users` | public |
+| GET | `/users/:reference` | public |
+| POST | `/accounts` | public |
+| GET | `/accounts/:reference/balance` | public |
+| POST | `/accounts/:reference/credit` | **interne** |
+| POST | `/accounts/:reference/debit` | **interne** |
+
+Les deux endpoints de mouvement sont réservés à `payments`. Ils sont protégés
+par `InternalApiKeyGuard`, qui compare `x-api-key` et `x-api-secret` à
+`INTERNAL_API_KEY` et `INTERNAL_API_SECRET` avec `timingSafeEqual`. Les deux
+moitiés sont toujours comparées, et une différence de longueur est intégrée au
+résultat au lieu de court-circuiter la comparaison : un échec ne révèle donc rien
+sur la proximité de la tentative. `/users` et `/accounts` restent publics.
+
+### Un mouvement d'argent, exactement une fois
+
+Le crédit et le débit sont idempotents sur `(wallet_id, transaction_id)`, garanti
+par une contrainte unique plutôt que par une recherche préalable. `payments`
+réessaie sur timeout, donc un rejeu doit être gratuit :
+
+- **même clé, même corps** : le mouvement d'origine est renvoyé à l'octet près,
+  et rien ne bouge une seconde fois ;
+- **même clé, corps différent** : `IDEMPOTENCY_CONFLICT`, puisqu'il s'agit d'un
+  bug de l'appelant et non d'un réessai ;
+- **même clé, en concurrence** : la transaction perdante bute sur la contrainte,
+  est annulée entièrement, et renvoie le mouvement du gagnant.
+
+La clé est portée par le wallet, ce qui permet à la saga de réutiliser un même
+`transaction_id` pour le débit sur la source et le crédit sur la destination.
+
+### Concurrence
+
+Le solde n'est jamais lu en mémoire puis réécrit. Chaque mouvement est une seule
+instruction conditionnelle dont les gardes vivent dans le `WHERE`, si bien que la
+décision et l'écriture partagent un même verrou de ligne :
+
+```sql
+UPDATE wallets SET balance = balance + :delta
+ WHERE id = :id AND status = 'Active' AND currency = :currency
+   AND balance - reserved_amount >= :required   -- débits uniquement
+RETURNING balance
+```
+
+Zéro ligne affectée signifie qu'un prédicat a échoué ; le service relit alors la
+ligne uniquement pour nommer la raison, et ce chemin ne peut produire qu'un
+refus. Vingt débits concurrents de 100 sur un solde de 1 000 donnent exactement
+dix `Approved`, dix `Declined` et un solde final de 0. Un test de bout en bout
+couvre précisément ce cas, un autre couvre vingt rejeux concurrents d'une même clé.
+
+Un solde insuffisant est un `4001` / `INSUFFICIENT_BALANCE` sur un **422**, et
+aucune ligne n'est écrite au ledger. Le `data` de cette erreur porte quand même
+la `BalanceOperationResponse` complète, avec `status: "Declined"` et un
+`declined_reason` : l'appelant lit donc une seule forme, que le mouvement ait été
+accepté ou refusé.
+
+### Le ledger
+
+Toute écriture de solde, y compris le solde d'ouverture d'un wallet, ajoute une
+ligne à `ledger_entries`. Rien n'en modifie ni n'en supprime jamais une, et cela
+est garanti par un trigger de base plutôt que par convention : aucun chemin de
+code, aucune migration, aucune session `psql` ne peut amender un mouvement après
+coup.
+
+```
+$ psql -c 'update ledger_entries set amount = 1'
+ERROR:  ledger_entries is append-only (attempted UPDATE)
+```
+
+Le solde du wallet est donc un cache de la somme de cette table.
+
+## `transactions`
+
+| Méthode | Route | |
+|---------|-------|--|
+| POST | `/transactions` | enregistrer un mouvement (chemin de repli) |
+| GET | `/transactions` | historique paginé et filtré |
+| GET | `/transactions/:reference` | un mouvement |
+
+### La file est la porte d'entrée
+
+Les mouvements arrivent normalement en `payment.transaction.recorded` sur la file
+durable `transactions.events`, émise par `payments`. Le `POST` HTTP existe comme
+repli et comme point d'entrée des tests ; les deux partagent un seul DTO, donc
+les deux chemins ne peuvent pas diverger.
+
+L'acquittement est manuel, et chaque issue est délibérée :
+
+| Issue | Action | Pourquoi |
+|-------|--------|----------|
+| ajouté, ou déjà connu | `ack` | le ledger détient le mouvement |
+| payload malformé | `ack` + log d'erreur | le redélivrer indéfiniment ne construirait qu'une boucle empoisonnée ; le payload est journalisé pour un rejeu manuel |
+| échec transitoire (base indisponible) | `nack`, remise en file | la livraison suivante a une vraie chance d'aboutir |
+
+### Idempotence et ordre
+
+`transaction_id` est unique dans tout le ledger : une redélivrance, situation
+normale en livraison au moins une fois, n'ajoute donc rien. En HTTP, un mouvement
+inédit répond **201**, un rejeu répond **200** avec la ligne stockée. Dix
+livraisons concurrentes d'une même clé donnent un 201, neuf 200 et une seule
+ligne.
+
+`occurred_at`, le temps métier fourni par le service émetteur, est volontairement
+distinct de `recorded_at`, le temps d'insertion, et l'historique est trié sur le
+premier. Les égalités se départagent sur `recorded_at` puis sur `id`, de sorte
+qu'un mouvement ne peut pas changer de page entre deux requêtes et apparaître
+deux fois, ou pas du tout.
+
+### Pas d'historique sans périmètre
+
+Une requête d'historique doit porter `user_reference` ou `wallet_reference` ;
+sinon elle est refusée par un **422**, avant qu'aucune requête ne parte. Ce n'est
+pas un détail de validation mais une décision de capacité, un listing sans
+périmètre scannant le ledger entier. C'est aussi pourquoi les deux index
+composites sont `(wallet_reference, occurred_at DESC)` et
+`(user_reference, occurred_at DESC)`. Un filtre `type` seul ne débloque pas un
+listing.
+
+### Append-only, là encore par trigger
+
+```
+$ psql -c 'update transactions set amount = 1'
+ERROR:  transactions is append-only (attempted UPDATE)
+```
+
+Une correction est une nouvelle ligne `REFUND` qui compense l'originale, jamais
+un amendement. Le seed livre exactement cette forme : un débit, son
+remboursement, puis un crédit.
+
+## `payments`
+
+| Méthode | Route | |
+|---------|-------|--|
+| POST | `/payments` | lancer un paiement |
+| GET | `/payments/:reference` | lire son état |
+| GET | `/payments` | listing d'administration, paginé |
+
+C'est le service pour lequel les deux autres existent, et celui qui a été écrit
+pour être lu. [DECISIONS.md](DECISIONS.md) argumente les choix ; cette section
+dit ce qui est là.
+
+### Architecture propre, vérifiée plutôt que décrite
+
+```
+src/
+├── domain/          couche 0 — aucune dépendance sortante, framework compris
+├── application/     couche 1 — dépend uniquement du domaine
+├── infrastructure/  couche 2 — implémente les ports du domaine
+└── presentation/    couche 3 — HTTP
+```
+
+Les imports ne pointent que vers l'intérieur. C'est garanti deux fois : par
+`no-restricted-imports` dans `services/payments/.eslintrc.json`, et par
+`src/architecture.spec.ts`, qui analyse chaque instruction d'import réelle et
+**fait échouer le build** en cas de violation. Une règle de lint se désactive en
+ligne ; un test rouge, non. La suite vérifie aussi son propre cas négatif :
+ajouter `@nestjs/common` à `domain/model/money.ts` la fait passer au rouge, parce
+qu'un garde-fou incapable d'échouer ne prouve rien.
+
+Cinq représentations, jamais confondues, avec un mapper explicite entre chaque
+paire :
+
+| Objet | Couche | Porte |
+|-------|--------|-------|
+| `InitiatePaymentRequest` | presentation | les décorateurs `class-validator` et Swagger |
+| `InitiatePaymentCommand` | application | de la donnée nue, aucun décorateur |
+| `Payment` | domain | les invariants et le comportement |
+| `PaymentOrmEntity` | infrastructure | les `@Column()` et compagnie |
+| `PaymentResponse` | presentation | le contrat sortant |
+
+`Payment` n'importe rien hors de `domain/`, ce qui permet de tester la machine à
+états entière sans base, sans HTTP et sans Nest : 22 tests, en quelques
+millisecondes.
+
+### La machine à états
+
+`ALLOWED_TRANSITIONS` est une table unique dans le domaine, et tout ce qui n'y
+figure pas est impossible :
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Processing : débit tenté
+    Pending --> Declined : refusé d'emblée
+    Processing --> Approved : crédit accepté
+    Processing --> Declined : refus au débit
+    Processing --> Compensated : remboursé
+    Processing --> CompensationPending : remboursement dû
+    CompensationPending --> Compensated : repris par le réconciliateur
+    Approved --> [*]
+    Declined --> [*]
+    Compensated --> [*]
+```
+
+`Approved`, `Declined` et `Compensated` sont terminaux. `CompensationPending` ne
+l'est délibérément pas : de l'argent est au mauvais endroit, et seul le
+réconciliateur l'en sort.
+
+### La saga
+
+Chaque étape est une commande avec sa propre transaction ; la saga ne décide que
+de la suite.
+
+1. le paiement est persisté `Pending` **avant le moindre appel sortant**, pour
+   qu'un crash laisse toujours quelque chose que le réconciliateur retrouvera ;
+2. `Processing`, puis `accounts.debit(source)`. Un refus décline le paiement et
+   s'arrête là, rien n'ayant bougé ;
+3. `accounts.credit(destination)`. Cet échec-là ne peut pas décliner le paiement,
+   puisque la source est déjà à découvert. La seule réponse correcte est de
+   rendre l'argent ;
+4. l'approbation et les deux lignes d'outbox commitent **dans une seule
+   transaction**, si bien que le ledger ne peut jamais entendre parler d'un
+   paiement que la base a annulé.
+
+Chaque patte porte sa propre clé d'idempotence dérivée de la référence du
+paiement : `pay_01hq…`, `…:credit`, `…:refund`. C'est ce qui rend chaque réessai,
+et le réconciliateur lui-même, rejouable sans risque.
+
+#### Le flux nominal
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Client
+    participant P as payments
+    participant DB as pg-payments
+    participant A as accounts
+    participant MQ as RabbitMQ
+    participant T as transactions
+
+    C->>P: POST /payments (transaction_id, montant, wallets)
+    P->>DB: INSERT clé d'idempotence, la contrainte unique arbitre
+    P->>DB: INSERT paiement (Pending)
+    Note over P,DB: durable avant le moindre appel sortant
+    P->>DB: UPDATE paiement (Processing)
+
+    P->>A: POST /accounts/{source}/debit, clé pay_01hq…
+    A->>A: UPDATE conditionnel + ligne de ledger, une transaction
+    A-->>P: 200 Approved (trx_…)
+    P->>DB: UPDATE paiement (référence du débit)
+
+    P->>A: POST /accounts/{destination}/credit, clé pay_01hq…:credit
+    A-->>P: 200 Approved (trx_…)
+
+    Note over P,DB: une seule transaction
+    P->>DB: UPDATE paiement (Approved)
+    P->>DB: INSERT outbox × 2 (DEBIT, CREDIT)
+
+    P->>DB: clé d'idempotence → COMPLETED
+    P-->>C: 201 { status: "Approved", reference: pay_… }
+
+    Note over P,MQ: après le commit, jamais pendant
+    P->>MQ: OutboxRelay vide la file, toutes les 2 s
+    MQ->>T: payment.transaction.recorded × 2
+    T->>T: ajout, idempotent sur transaction_id
+```
+
+La réponse au client n'attend pas le broker : la publication est au moins une
+fois via l'outbox, et le ledger rattrape son retard quelques secondes plus tard.
+
+#### Le flux de compensation
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Client
+    participant P as payments
+    participant DB as pg-payments
+    participant A as accounts
+    participant MQ as RabbitMQ
+
+    C->>P: POST /payments
+    P->>DB: INSERT paiement (Pending) → UPDATE (Processing)
+    P->>A: debit(source), clé pay_01hq…
+    A-->>P: 200 Approved (trx_…)
+    Note over P,A: la source est désormais à découvert
+
+    P->>A: credit(destination), clé pay_01hq…:credit
+    A--xP: timeout ou 5xx, après tous les réessais
+    Note over P: un crédit qui échoue ne peut pas décliner le paiement,<br/>la seule réponse correcte est de rendre l'argent
+
+    P->>A: credit(source), clé pay_01hq…:refund
+    alt le remboursement passe
+        A-->>P: 200 Approved (trx_…)
+        Note over P,DB: une seule transaction
+        P->>DB: UPDATE paiement (Compensated)
+        P->>DB: INSERT outbox (REFUND)
+        P-->>C: 201 { status: "Compensated" }
+        P->>MQ: le relais publie le mouvement REFUND
+    else le remboursement échoue aussi
+        P->>DB: UPDATE paiement (CompensationPending)
+        P-->>C: 201 { status: "CompensationPending" }
+        Note over P: l'argent est au mauvais endroit, le réconciliateur<br/>réessaie chaque minute jusqu'à ce qu'il n'y soit plus
+    end
+```
+
+`CompensationPending` n'est délibérément pas terminal. Tous les autres états de
+fin le sont.
+
+### Idempotence
+
+On insère d'abord, on pose les questions ensuite. Un `SELECT` suivi d'un `INSERT`
+laisserait deux requêtes concurrentes conclure toutes les deux que la clé est
+libre :
+
+```
+INSERT de la clé (contrainte unique)
+  ├─ succès              → exécuter le cas d'usage, puis stocker la réponse
+  └─ violation d'unicité → relire la ligne
+       ├─ empreinte de requête différente → 409 IDEMPOTENCY_CONFLICT
+       ├─ toujours IN_PROGRESS            → 409, la première tentative tourne encore
+       └─ COMPLETED                       → renvoyer la réponse stockée, inchangée
+```
+
+L'empreinte est canonique : un corps JSON réordonné est reconnu comme la même
+requête, un montant modifié ne l'est pas.
+
+### Parler à `accounts`
+
+Une seule classe sait qu'`accounts` parle HTTP. Elle possède le timeout de 3 s,
+les réessais et le circuit breaker, et traduit chaque réponse dans le vocabulaire
+du domaine : rien au-dessus d'elle ne voit jamais une `AxiosError` ni un code de
+statut.
+
+Réessayable et non réessayable sont strictement séparés. Un timeout, un
+`ECONNREFUSED`, un 5xx ou un 429 obtiennent un backoff exponentiel avec pleine
+gigue ; un 4xx métier, non, parce que réessayer une décision perd du temps et
+risque un second mouvement. Un paiement refusé ne compte jamais pour l'ouverture
+du circuit : un refus signifie que le service est debout et répond.
+
+### Outbox transactionnel
+
+Les lignes d'`outbox` sont écrites dans la même transaction que le changement
+d'état qui les justifie, et un relais `@Cron` les publie vers RabbitMQ toutes les
+deux secondes, en ne marquant `published_at` qu'une fois le message accepté par
+le broker. La publication est donc au moins une fois, le paiement n'attend jamais
+le broker, et les consommateurs sont idempotents sur `transaction_id`, ce qui
+rend les doublons inoffensifs.
+
+`GET /health` publie la profondeur de l'outbox : un nombre qui ne cesse de monter
+signale que le relais ou le broker est en difficulté.
+
+### Réconciliation
+
+Un travail `@Cron` reprend chaque minute les paiements bloqués en `Processing`
+depuis plus de cinq minutes, débités et jamais crédités parce que le processus
+est mort en pleine saga, ainsi que tout ce qui est en `CompensationPending`, et
+rejoue la compensation. Vérifié : un paiement laissé en `CompensationPending`
+atteint `Compensated` à la passe suivante.
+
+### Suivre un paiement à travers les trois services
+
+Chaque ligne de log est du JSON portant `service_name` et `correlation_id`.
+L'identifiant vient de `x-correlation-id` quand l'appelant en envoie un, est créé
+sinon, est renvoyé dans la réponse, accompagne chaque appel sortant et voyage
+dans chaque message d'outbox. L'ajout au ledger déclenché par la file apparaît
+donc sous le même identifiant que la requête HTTP qui l'a causé.
+
+```
+$ docker compose logs | grep corr-trace-1788724469
+  payments-1       InitiatePaymentHandler          payment initiated
+  payments-1       DebitSourceWalletHandler        source wallet debited
+  accounts-1       -                               request completed
+  payments-1       CreditDestinationWalletHandler  payment approved
+  accounts-1       -                               request completed
+  payments-1       PaymentApprovedHandler          lifecycle event queued for publication
+  payments-1       OutboxRelay                     outbox message published
+  transactions-1   TransactionsEventsController    movement appended to the ledger
+  transactions-1   TransactionsEventsController    movement appended to the ledger
+```
+
+## Les points non négociables, et où chacun est garanti
+
+| Exigence | Où elle est garantie |
+|----------|----------------------|
+| `docker compose up` depuis un clone frais donne un système fonctionnel | `make up && make migrate && make seed` ; chaque `depends_on` attend `service_healthy` |
+| `make test` passe intégralement | 232 tests unitaires et d'intégration sur les quatre paquets |
+| Aucun `synchronize: true`, uniquement des migrations | `synchronize: false` dans les trois `data-source.ts` ; `make migrate` |
+| Aucun secret dans le code, `.env` validé au démarrage | `EnvConfig` + `validate: validateEnv` par service, voir [décision 20](DECISIONS.md#20-lenvironnement-est-validé-avec-class-validator-et-non-joi) |
+| Aucun `any` implicite, `strict: true` | `tsconfig.base.json`, hérité par tous les paquets |
+| `domain/` n'importe ni NestJS ni TypeORM | `no-restricted-imports` **et** `src/architecture.spec.ts`, qui vérifie aussi qu'il échoue sur une violation |
+| `Payment` et `PaymentOrmEntity` sont distincts, reliés par un mapper | `domain/model/payment.ts`, `infrastructure/persistence/entities/payment.orm-entity.ts`, `mappers/payment.orm-mapper.ts` |
+| La machine à états est testable sans base ni HTTP | `domain/model/payment.spec.ts`, 22 tests, toutes les transitions interdites couvertes |
+| Le contrôleur ne touche que `commandBus` et `queryBus` | `presentation/payments.controller.ts` : ce sont ses deux seules dépendances |
+| Les commandes renvoient une référence, jamais l'agrégat | `InitiatePaymentResult` vaut `{ reference: string }` |
+| Les requêtes lisent une projection, jamais l'agrégat | `PaymentReadPort` au-dessus de la vue `payment_read_model` |
+| Les événements de domaine sont publiés après commit | `pullEvents()` puis `EventBus.publishAll`, hors de `transaction.run(...)` |
+| Aucun flottant sur un montant, nulle part | colonnes `bigint` avec transformateur entier ; `Money` refuse un non-entier |
+| Chaque endpoint interne est protégé | `InternalApiKeyGuard` sur `credit` et `debit` ; un appel sans identifiants est un 401 |
+| Les cinq scénarios e2e passent | `services/payments/test/payments.e2e-spec.ts`, lancés par `make test:e2e-isolated` |
+| Un `correlation_id` suit un paiement à travers les trois services | `x-correlation-id` en entrée, créé s'il manque, renvoyé en sortie, porté par chaque appel sortant et dans chaque message d'outbox |
+
+## Docker
+
+Chaque service se construit depuis un Dockerfile multi-étapes exécuté à la racine
+du dépôt, pour que le paquet partagé fasse partie du contexte de build :
+
+`deps` (manifestes seuls, mis en cache) → `build` (compile le partagé, puis le
+service) → `prod-deps` (même installation, purgée des devDependencies) →
+`runner` (`node:20-alpine`, utilisateur `node` non-root, `tini` en PID 1).
+
+Chaque paquet écrit son `.tsbuildinfo` dans son propre `dist`, de sorte que vider
+le répertoire de sortie efface aussi l'état incrémental. Sans cela, `nest build`
+trouverait une info de build périmée, conclurait qu'il n'y a rien à émettre, et
+produirait une image sans `dist`.
+
+Une étape `dev` existe en parallèle pour le fichier d'override. La santé est
+vérifiée par `pg_isready` sur les bases et par `GET /health` sur les
+applications, et chaque `depends_on` attend `condition: service_healthy` :
+`payments` ne démarre qu'une fois qu'`accounts` et `transactions` répondent
+vraiment.
