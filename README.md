@@ -64,9 +64,26 @@ make seed                 # charge les jeux de données de développement
 ```
 
 `make up && make migrate && make seed` : c'est tout ce dont un clone frais a
-besoin. Si `make up` s'arrête sur un port déjà pris, c'est en général un
-PostgreSQL local sur 5433-5435 ; changez les `*_DB_EXPOSED_PORT` dans `.env`
-plutôt que de tuer le vôtre.
+besoin. Comptez quelques minutes sur le premier `make up`, qui construit trois
+images multi-étapes — il reste parfois une minute sans rien afficher, c'est
+normal. Les suivants repartent du cache et prennent quelques secondes.
+
+Si `make up` s'arrête sur un port déjà pris, c'est en général un PostgreSQL
+local sur 5433-5435 ; changez les `*_DB_EXPOSED_PORT` dans `.env` plutôt que de
+tuer le vôtre.
+
+### Vérifier que ça tourne
+
+```bash
+make ps                          # les trois services doivent afficher (healthy)
+curl -s localhost:3001/health    # {"code":"200","message":"SUCCESS","data":{...,"status":"Healthy"}}
+```
+
+Pour voir un paiement traverser les trois services sans écrire une requête,
+importez la collection [Postman](#postman) et lancez son dossier **Scenario** :
+il crée un utilisateur, deux wallets, règle un paiement, le rejoue et finit sur
+un refus. Sinon, [L'API par l'exemple](#lapi-par-lexemple) donne les `curl`
+équivalents, endpoint par endpoint.
 
 | Surface           | URL                              |
 |-------------------|----------------------------------|
@@ -80,6 +97,29 @@ Les bases sont exposées sur 5433 (accounts), 5434 (transactions) et 5435
 l'une d'elles.
 
 `make help` affiche la liste complète des cibles.
+
+### Arrêter, et repartir de zéro
+
+```bash
+make down    # arrête tout, garde les données
+make clean   # arrête, supprime volumes, images locales et dist/
+```
+
+### Sans `make`
+
+Les cibles ne font qu'enchaîner du `docker compose` ; sous Windows sans WSL,
+voici les équivalents des quatre commandes du démarrage :
+
+```bash
+cp .env.example .env
+docker compose up -d --build --wait --renew-anon-volumes
+
+# migrations et fixtures, service par service (accounts, transactions, payments)
+docker compose exec -T accounts sh -lc 'cd /app/services/accounts && pnpm typeorm migration:run'
+docker compose exec -T accounts sh -lc 'cd /app/services/accounts && pnpm seed'
+
+docker compose down --remove-orphans
+```
 
 Le seed est idempotent, indexé sur l'email du client et le libellé du wallet :
 `make seed` peut être relancé à volonté sans dupliquer une ligne ni recréditer
