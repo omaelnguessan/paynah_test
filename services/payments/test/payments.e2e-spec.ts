@@ -118,7 +118,7 @@ describe('payments (e2e)', () => {
     const accounts = new DataSource({
       type: 'postgres',
       host: process.env.ACCOUNTS_DB_HOST ?? 'pg-accounts',
-      port: 5432,
+      port: Number(process.env.ACCOUNTS_DB_PORT ?? 5432),
       username: 'accounts_user',
       password: 'accounts_pwd',
       database: 'accounts',
