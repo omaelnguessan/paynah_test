@@ -4,6 +4,7 @@ import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavai
 import { InvalidTransitionError } from '../../../domain/errors/invalid-transition.error';
 import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
 import { PaymentCompensatedEvent } from '../../../domain/events/payment-compensated.event';
+import { PaymentDeclinedEvent } from '../../../domain/events/payment-declined.event';
 import { Payment } from '../../../domain/model/payment';
 import { FailureReason, PaymentStatus } from '../../../domain/model/payment-status';
 import { ACCOUNTS_PORT } from '../../../domain/ports/accounts.port';
@@ -12,10 +13,12 @@ import { LedgerMovement, TRANSACTIONS_PORT } from '../../../domain/ports/transac
 import { TRANSACTION_RUNNER } from '../../../domain/ports/transaction-runner.port';
 import {
   CREDIT,
+  DEBIT,
   InMemoryPaymentRepository,
   REFUND,
   SOURCE,
   aDebitedPayment,
+  aPayment,
   inlineTransaction,
   movement,
 } from '../../../testing/doubles';
@@ -23,7 +26,7 @@ import { CompensatePaymentCommand } from '../../commands/compensate-payment.comm
 import { CompensatePaymentHandler } from './compensate-payment.handler';
 
 describe('CompensatePaymentHandler', () => {
-  const accounts = { debit: jest.fn(), credit: jest.fn() };
+  const accounts = { debit: jest.fn(), credit: jest.fn(), findMovement: jest.fn() };
   const ledger = { record: jest.fn() };
   const events = { publishAll: jest.fn() };
 
@@ -131,6 +134,90 @@ describe('CompensatePaymentHandler', () => {
 
     await expect(handler.execute(command(payment))).resolves.toBe(REFUND.value);
     expect(payment.status).toBe(PaymentStatus.Compensated);
+  });
+
+  describe('a payment that never recorded its debit', () => {
+    /**
+     * The reconciler hands over payments stuck in `Processing`, and the state
+     * alone cannot say whether the money left: the process may have died before
+     * the debit, or after it and before writing the reference down. Refunding
+     * on a guess creates money half the time.
+     */
+    const stuckInProcessing = (): Payment => {
+      const payment = aPayment();
+      payment.markProcessing();
+      payment.pullEvents();
+      return payment;
+    };
+
+    it('declines without refunding when the debit never happened', async () => {
+      const payment = stuckInProcessing();
+      const { handler, payments } = await handlerFor(payment);
+      accounts.findMovement.mockResolvedValue(null);
+
+      await expect(handler.execute(command(payment))).resolves.toBeNull();
+
+      // The wallet never lost anything, so crediting it would have invented it.
+      expect(accounts.credit).not.toHaveBeenCalled();
+      expect(ledger.record).not.toHaveBeenCalled();
+      expect(payment.status).toBe(PaymentStatus.Declined);
+      expect(payment.failureReason).toBe(FailureReason.ACCOUNTS_UNAVAILABLE);
+      expect(payments.statuses).toEqual([PaymentStatus.Declined]);
+      expect(events.publishAll).toHaveBeenCalledWith([expect.any(PaymentDeclinedEvent)]);
+    });
+
+    it('asks accounts under the payment own debit key', async () => {
+      const payment = stuckInProcessing();
+      const { handler } = await handlerFor(payment);
+      accounts.findMovement.mockResolvedValue(null);
+
+      await handler.execute(command(payment));
+
+      expect(accounts.findMovement).toHaveBeenCalledWith(SOURCE, payment.reference.value);
+    });
+
+    it('refunds when the debit had gone through after all', async () => {
+      const payment = stuckInProcessing();
+      const { handler } = await handlerFor(payment);
+      accounts.findMovement.mockResolvedValue(movement(DEBIT));
+      accounts.credit.mockResolvedValue(movement(REFUND));
+
+      await expect(handler.execute(command(payment))).resolves.toBe(REFUND.value);
+
+      // The reference the answer carried is recorded, then unwound.
+      expect(payment.debitTransactionReference?.value).toBe(DEBIT.value);
+      expect(payment.status).toBe(PaymentStatus.Compensated);
+      expect(accounts.credit).toHaveBeenCalledWith(
+        SOURCE,
+        payment.money,
+        `${payment.reference.value}:refund`,
+        expect.anything(),
+      );
+    });
+
+    it('decides nothing while accounts cannot be reached', async () => {
+      const payment = stuckInProcessing();
+      const { handler, payments } = await handlerFor(payment);
+      accounts.findMovement.mockRejectedValue(new AccountsUnavailableError('find-movement'));
+
+      await expect(handler.execute(command(payment))).resolves.toBeNull();
+
+      // Still unknown, so still Processing: the next pass asks again rather
+      // than committing to an answer nobody has.
+      expect(payment.status).toBe(PaymentStatus.Processing);
+      expect(payments.saved).toEqual([]);
+      expect(accounts.credit).not.toHaveBeenCalled();
+    });
+
+    it('does not ask when the aggregate already knows the debit', async () => {
+      const payment = aDebitedPayment();
+      const { handler } = await handlerFor(payment);
+      accounts.credit.mockResolvedValue(movement(REFUND));
+
+      await handler.execute(command(payment));
+
+      expect(accounts.findMovement).not.toHaveBeenCalled();
+    });
   });
 
   it('reports a payment that does not exist', async () => {

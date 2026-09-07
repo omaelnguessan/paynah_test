@@ -35,6 +35,15 @@ export interface AccountsPort {
     idempotencyKey: string,
     details: MovementDetails,
   ): Promise<MovementResult>;
+  /**
+   * Has this key already moved money on this wallet?
+   *
+   * The saga needs it after losing an answer: "the debit never happened" and
+   * "the debit happened and the response was lost" demand opposite repairs, and
+   * only the service that owns the balance can tell them apart. `null` means
+   * the key produced nothing; an error means we still do not know.
+   */
+  findMovement(wallet: Reference, idempotencyKey: string): Promise<MovementResult | null>;
 }
 
 export const ACCOUNTS_PORT = Symbol('ACCOUNTS_PORT');

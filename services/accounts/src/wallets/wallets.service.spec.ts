@@ -247,6 +247,57 @@ describe('WalletsService', () => {
     });
   });
 
+  describe('finding a movement by its key', () => {
+    const recorded = {
+      transaction_id: 'pay_01hq3m8x0000zt7k9d2v4bqf1c',
+      reference: 'trx_01hq3m8x0000zt7k9d2v4bqf1c',
+      type: TransactionType.DEBIT,
+      amount: 2_500,
+      currency: Currency.XOF,
+      balance_before: 10_000,
+      balance_after: 7_500,
+    } as LedgerEntry;
+
+    it('returns the movement the key produced', async () => {
+      wallets.findByReference.mockResolvedValue(walletFixture());
+      ledger.findByIdempotencyKey.mockResolvedValue(recorded);
+
+      const found = await service.findMovement(WALLET_REFERENCE, recorded.transaction_id);
+
+      expect(found).toBe(recorded);
+      expect(ledger.findByIdempotencyKey).toHaveBeenCalledWith(
+        walletFixture().id,
+        recorded.transaction_id,
+      );
+    });
+
+    it('returns nothing when the key never moved money here', async () => {
+      wallets.findByReference.mockResolvedValue(walletFixture());
+      ledger.findByIdempotencyKey.mockResolvedValue(null);
+
+      await expect(service.findMovement(WALLET_REFERENCE, 'never-used')).resolves.toBeNull();
+    });
+
+    it('moves nothing, whatever the answer', async () => {
+      wallets.findByReference.mockResolvedValue(walletFixture());
+      ledger.findByIdempotencyKey.mockResolvedValue(null);
+
+      await service.findMovement(WALLET_REFERENCE, 'never-used');
+
+      // The caller asks this precisely because it does not want a side effect.
+      expect(wallets.move).not.toHaveBeenCalled();
+      expect(ledger.append).not.toHaveBeenCalled();
+    });
+
+    it('reports an unknown wallet', async () => {
+      wallets.findByReference.mockResolvedValue(null);
+
+      await expect(service.findMovement(WALLET_REFERENCE, 'anything')).rejects.toBeInstanceOf(
+        WalletNotFoundException,
+      );
+    });
+  });
+
   describe('credit', () => {
     it('applies a positive delta', async () => {
       wallets.findByReference.mockResolvedValue(walletFixture());

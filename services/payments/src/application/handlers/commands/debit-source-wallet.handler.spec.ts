@@ -2,6 +2,7 @@ import { EventBus } from '@nestjs/cqrs';
 import { Test } from '@nestjs/testing';
 import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
 import { InsufficientBalanceError } from '../../../domain/errors/insufficient-balance.error';
+import { WalletFrozenError } from '../../../domain/errors/wallet.errors';
 import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
 import { PaymentDeclinedEvent } from '../../../domain/events/payment-declined.event';
 import { Payment } from '../../../domain/model/payment';
@@ -88,15 +89,34 @@ describe('DebitSourceWalletHandler', () => {
     expect(events.publishAll).toHaveBeenCalledWith([expect.any(PaymentDeclinedEvent)]);
   });
 
-  it('records an unreachable upstream as a decline of its own kind', async () => {
+  it('never declines a payment whose debit outcome is unknown', async () => {
     const payment = aPayment();
-    const { handler } = await handlerFor(payment);
+    const { handler, payments } = await handlerFor(payment);
     accounts.debit.mockRejectedValue(new AccountsUnavailableError('debit'));
 
     await expect(handler.execute(command(payment))).rejects.toBeInstanceOf(
       AccountsUnavailableError,
     );
-    expect(payment.failureReason).toBe(FailureReason.ACCOUNTS_UNAVAILABLE);
+
+    // `accounts` may have applied the debit and lost the answer on the way
+    // back. Declining here would close the payment over money already gone, so
+    // it stays Processing — which is what the reconciler looks for.
+    expect(payment.status).toBe(PaymentStatus.Processing);
+    expect(payment.failureReason).toBeNull();
+    expect(payments.statuses).toEqual([PaymentStatus.Processing]);
+    expect(events.publishAll).not.toHaveBeenCalled();
+  });
+
+  it('still declines when accounts refused for a reason it can name', async () => {
+    const payment = aPayment();
+    const { handler } = await handlerFor(payment);
+    accounts.debit.mockRejectedValue(new WalletFrozenError(SOURCE.value));
+
+    await expect(handler.execute(command(payment))).rejects.toBeInstanceOf(WalletFrozenError);
+
+    // A named refusal means the service answered and nothing moved: terminal.
+    expect(payment.status).toBe(PaymentStatus.Declined);
+    expect(payment.failureReason).toBe(FailureReason.WALLET_FROZEN);
   });
 
   it('lets a non-domain failure through without touching the payment', async () => {

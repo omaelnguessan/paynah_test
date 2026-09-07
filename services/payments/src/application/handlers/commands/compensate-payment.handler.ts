@@ -2,9 +2,14 @@ import { Inject, Logger } from '@nestjs/common';
 import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
 import { DomainError } from '../../../domain/errors/domain.error';
 import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
+import { Payment } from '../../../domain/model/payment';
 import { FailureReason, PaymentStatus } from '../../../domain/model/payment-status';
 import { Reference } from '../../../domain/model/reference';
-import { ACCOUNTS_PORT, AccountsPort } from '../../../domain/ports/accounts.port';
+import {
+  ACCOUNTS_PORT,
+  AccountsPort,
+  MovementResult,
+} from '../../../domain/ports/accounts.port';
 import {
   PAYMENT_REPOSITORY,
   PaymentRepository,
@@ -20,12 +25,18 @@ import {
 import { CompensatePaymentCommand } from '../../commands/compensate-payment.command';
 
 /**
- * Puts the money back where it came from.
+ * Puts the money back where it came from — but only money that actually left.
  *
  * Called by the saga when the credit fails, and again by the reconciler for any
  * payment left owing a refund. It is safe to run twice: the refund carries the
  * payment's `:refund` idempotency key, so `accounts` applies it once whatever
  * happens here.
+ *
+ * The reconciler also hands it payments that never got past `Processing`, and
+ * those cover two opposite worlds: the debit was applied and its answer lost,
+ * or the debit never happened at all. Refunding blindly would invent money in
+ * the second. So when the aggregate carries no debit reference, this asks
+ * `accounts` which world it is in rather than guessing.
  */
 @CommandHandler(CompensatePaymentCommand)
 export class CompensatePaymentHandler implements ICommandHandler<CompensatePaymentCommand> {
@@ -46,6 +57,10 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
     }
     if (payment.status === PaymentStatus.Compensated) {
       return payment.refundTransactionReference?.value ?? null;
+    }
+
+    if (!payment.debitTransactionReference && !(await this.confirmDebit(payment))) {
+      return null;
     }
 
     try {
@@ -102,5 +117,59 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
       );
       return null;
     }
+  }
+
+  /**
+   * Establishes whether the source was ever debited, for a payment whose
+   * aggregate does not say. Returns true when there is money to give back.
+   *
+   * Three answers, three outcomes:
+   * - a movement exists → the debit landed, its reference is recorded and the
+   *   refund proceeds;
+   * - no movement → nothing ever left the wallet, so the payment is declined
+   *   and **no credit is issued**, which is the whole point of asking;
+   * - `accounts` cannot be reached → still unknown, so nothing is decided and
+   *   the payment is left exactly as it is for the next pass.
+   */
+  private async confirmDebit(payment: Payment): Promise<boolean> {
+    let movement: MovementResult | null;
+    try {
+      movement = await this.accounts.findMovement(payment.source, payment.movementKey('debit'));
+    } catch (error) {
+      this.logger.warn(
+        {
+          payment_reference: payment.reference.value,
+          cause: error instanceof DomainError ? error.code : String(error),
+        },
+        'cannot establish whether the source was debited, leaving the payment untouched',
+      );
+      return false;
+    }
+
+    if (movement) {
+      // The debit was applied and only its answer was lost. Record what the
+      // ledger already knows, then unwind it.
+      if (payment.status === PaymentStatus.Processing) {
+        payment.markDebited(movement.transactionReference);
+        await this.transaction.run(() => this.payments.save(payment));
+      }
+      this.logger.warn(
+        {
+          payment_reference: payment.reference.value,
+          debit_transaction_reference: movement.transactionReference.value,
+        },
+        'the debit had gone through after all, compensating it',
+      );
+      return true;
+    }
+
+    payment.decline(FailureReason.ACCOUNTS_UNAVAILABLE);
+    await this.transaction.run(() => this.payments.save(payment));
+    this.events.publishAll(payment.pullEvents());
+    this.logger.log(
+      { payment_reference: payment.reference.value },
+      'the debit never happened, declining without a refund',
+    );
+    return false;
   }
 }

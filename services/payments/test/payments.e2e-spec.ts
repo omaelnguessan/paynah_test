@@ -10,6 +10,8 @@ import {
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { CommandBus } from '@nestjs/cqrs';
+import { CompensatePaymentCommand } from '../src/application/commands/compensate-payment.command';
 import { AccountsUnavailableError } from '../src/domain/errors/accounts-unavailable.error';
 import { PaymentStatus } from '../src/domain/model/payment-status';
 import { ACCOUNTS_PORT, AccountsPort } from '../src/domain/ports/accounts.port';
@@ -380,6 +382,7 @@ describe('payments (e2e)', () => {
       const real = app.get<AccountsPort>(ACCOUNTS_PORT);
       const timesOutOnCredit: AccountsPort = {
         debit: (wallet, money, key, details) => real.debit(wallet, money, key, details),
+        findMovement: (wallet, key) => real.findMovement(wallet, key),
         credit: async (wallet, money, key, details) => {
           // The refund is a credit too, and it must go through for real.
           if (key.endsWith(':refund')) {
@@ -435,6 +438,102 @@ describe('payments (e2e)', () => {
       expect(lines.map((line) => line.type).sort()).toEqual(['REFUND']);
       expect(lines[0].reference).toMatch(/^trx_/);
       expect(await ledgerOf(destination, data.reference)).toEqual([]);
+    }, 60_000);
+  });
+
+  describe('a debit whose outcome is unknown', () => {
+    /**
+     * The two states an interrupted debit can leave behind look identical from
+     * the payment's side — `Processing`, no debit reference — and they need
+     * opposite repairs. These two tests are the reason the reconciler asks
+     * `accounts` instead of assuming.
+     */
+    let unreliable: INestApplication;
+    let unreliableHttp: request.Agent;
+    let commands: CommandBus;
+    const behaviour = { landsBeforeFailing: true };
+
+    beforeAll(async () => {
+      const real = app.get<AccountsPort>(ACCOUNTS_PORT);
+      const losesTheAnswer: AccountsPort = {
+        credit: (wallet, money, key, details) => real.credit(wallet, money, key, details),
+        findMovement: (wallet, key) => real.findMovement(wallet, key),
+        debit: async (wallet, money, key, details) => {
+          // Either the movement is applied and the answer is lost on the way
+          // back, or the call never reaches `accounts` at all.
+          if (behaviour.landsBeforeFailing) {
+            await real.debit(wallet, money, key, details);
+          }
+          throw new AccountsUnavailableError('debit', 'TimeoutError: Timeout has occurred');
+        },
+      };
+
+      const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+        .overrideProvider(ACCOUNTS_PORT)
+        .useValue(losesTheAnswer)
+        .compile();
+      unreliable = moduleRef.createNestApplication();
+      unreliable.useGlobalPipes(createValidationPipe());
+      unreliable.useGlobalInterceptors(new ResponseInterceptor());
+      unreliable.useGlobalFilters(new AllExceptionsFilter(), new DomainErrorFilter());
+      await unreliable.init();
+      await unreliable.listen(0);
+      unreliableHttp = request(unreliable.getHttpServer());
+      commands = unreliable.get(CommandBus);
+    }, 60_000);
+
+    afterAll(async () => {
+      await unreliable?.close();
+    });
+
+    const initiateOnUnreliable = (body: Record<string, unknown>) =>
+      unreliableHttp.post('/payments').set('x-correlation-id', `e2e-${stamp}`).send(body);
+
+    /** What the reconciliation job does, without waiting five minutes for it. */
+    const reconcile = (reference: string) =>
+      commands.execute(new CompensatePaymentCommand(reference));
+
+    it('leaves the payment in flight rather than declaring a decline it cannot know', async () => {
+      behaviour.landsBeforeFailing = true;
+      const wallet = await fundedWallet(50_000);
+      const body = payment({ source_wallet_reference: wallet, amount: 20_000 });
+
+      const response = await initiateOnUnreliable(body).expect(201);
+
+      // Declining here would close the payment over money that has left.
+      expect(response.body.data.status).toBe(PaymentStatus.Processing);
+      expect(response.body.data.failure_reason).toBeNull();
+      expect(await balanceOf(wallet)).toBe(30_000);
+
+      // The reconciler asks `accounts`, finds the movement, and unwinds it.
+      await expect(reconcile(response.body.data.reference)).resolves.toMatch(/^trx_/);
+
+      const settled = await http.get(`/payments/${response.body.data.reference}`).expect(200);
+      expect(settled.body.data.status).toBe(PaymentStatus.Compensated);
+      expect(settled.body.data.debit_transaction_reference).toMatch(/^trx_/);
+      expect(await balanceOf(wallet)).toBe(50_000);
+    }, 60_000);
+
+    it('never refunds a debit that never happened', async () => {
+      behaviour.landsBeforeFailing = false;
+      const wallet = await fundedWallet(50_000);
+      const body = payment({ source_wallet_reference: wallet, amount: 20_000 });
+
+      const response = await initiateOnUnreliable(body).expect(201);
+      const reference = response.body.data.reference;
+
+      expect(response.body.data.status).toBe(PaymentStatus.Processing);
+      expect(await balanceOf(wallet)).toBe(50_000);
+
+      // Nothing was found under the debit key, so there is nothing to give
+      // back: refunding here would credit money the wallet never lost.
+      await expect(reconcile(reference)).resolves.toBeNull();
+
+      const settled = await http.get(`/payments/${reference}`).expect(200);
+      expect(settled.body.data.status).toBe(PaymentStatus.Declined);
+      expect(settled.body.data.debit_transaction_reference).toBeNull();
+      expect(await balanceOf(wallet)).toBe(50_000);
+      expect(await ledgerOf(wallet, reference)).toEqual([]);
     }, 60_000);
   });
 

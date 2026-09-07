@@ -230,6 +230,67 @@ describe('AccountsHttpClient', () => {
     });
   });
 
+  describe('looking a movement up', () => {
+    const path = `/accounts/${WALLET.value}/movements/${encodeURIComponent(PAYMENT.value)}`;
+
+    it('returns the movement the key produced', async () => {
+      nock(BASE_URL).get(path).reply(200, approved());
+
+      const found = await client.findMovement(WALLET, PAYMENT.value);
+
+      expect(found?.transactionReference.value).toBe('trx_01hq3m8x0000zt7k9d2v4bqf1c');
+      expect(found?.balanceAfter).toBe(5_000);
+    });
+
+    it('reads a 404 as an answer, not as a failure', async () => {
+      nock(BASE_URL)
+        .get(path)
+        .reply(404, { code: '4008', message: 'TRANSACTION_NOT_FOUND', data: null });
+
+      // The key moved nothing. That is a fact the saga acts on, so it must not
+      // arrive as an exception alongside "I could not reach the service".
+      await expect(client.findMovement(WALLET, PAYMENT.value)).resolves.toBeNull();
+    });
+
+    it('escapes a key that carries the saga separators', async () => {
+      const key = `${PAYMENT.value}:credit`;
+      nock(BASE_URL)
+        .get(`/accounts/${WALLET.value}/movements/${encodeURIComponent(key)}`)
+        .reply(200, approved());
+
+      await expect(client.findMovement(WALLET, key)).resolves.not.toBeNull();
+      expect(nock.pendingMocks()).toEqual([]);
+    });
+
+    it('sends the internal credentials', async () => {
+      let headers: Record<string, string> = {};
+      nock(BASE_URL)
+        .get(path)
+        .reply(function reply() {
+          headers = this.req.headers as unknown as Record<string, string>;
+          return [200, approved()];
+        });
+
+      await client.findMovement(WALLET, PAYMENT.value);
+
+      expect(headers['x-api-key']).toBe(SETTINGS.INTERNAL_API_KEY);
+    });
+
+    it('retries, then reports that it still does not know', async () => {
+      nock(BASE_URL)
+        .get(path)
+        .times(3)
+        .reply(503, { code: '5001', message: 'UPSTREAM_UNAVAILABLE', data: null });
+
+      // "Unknown" must never be mistaken for "no movement": one leads to a
+      // refund, the other to inventing money.
+      await expect(client.findMovement(WALLET, PAYMENT.value)).rejects.toBeInstanceOf(
+        AccountsUnavailableError,
+      );
+      expect(nock.pendingMocks()).toEqual([]);
+    });
+  });
+
   describe('the circuit breaker', () => {
     const unavailable = { code: '5001', message: 'UPSTREAM_UNAVAILABLE', data: null };
 

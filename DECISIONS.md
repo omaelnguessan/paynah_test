@@ -33,6 +33,7 @@ qu'enfoui.
 | [21](#21-la-limitation-de-débit-vit-dans-lapplication-pas-devant-elle) | La limitation de débit est **dans** le service, en mémoire | Une règle sur un reverse proxy, ou un compteur Redis dès maintenant | Une API se défend même quand on l'atteint directement, et le budget voyage avec le code qui sait ce qu'une route coûte. Le stockage partagé est un adaptateur à changer le jour où il y a plusieurs répliques, pas une raison de ne rien poser. |
 | [22](#22-le-débit-est-compté-par-identifiant-quand-il-y-en-a-un) | Compteur porté par la clé d'API interne quand elle est présente, par l'IP sinon | Compter tout le monde par IP | Un service amont sort par une seule adresse et émet trois mouvements par paiement : compté comme une IP publique, il s'auto-étrangle avant que quiconque n'attaque. |
 | [23](#23-lauthentification-de-lutilisateur-final-est-absente-et-cest-dit) | Pas d'authentification utilisateur, et c'est documenté | Poser un JWT vite fait pour cocher la case | Une couche d'authentification décorative donne l'illusion du contrôle sans modèle de propriété des wallets. Le manque est nommé, avec la forme qu'aurait le correctif. |
+| [24](#24-un-débit-dont-on-ignore-lissue-nest-pas-un-refus) | Une réponse perdue laisse le paiement `Processing`, et le réconciliateur interroge `accounts` | Décliner comme pour un refus, ou compenser sans vérifier | Les deux raccourcis se paient en argent : le premier ferme un paiement sur des fonds déjà partis, le second rembourse un débit qui n'a jamais eu lieu. Seul le service qui détient le solde peut trancher. |
 
 ---
 
@@ -465,3 +466,41 @@ base, et une vérification dans la couche présentation de `payments` avant que 
 commande ne soit construite. Le guard interne actuel reste à sa place : il
 protège la frontière entre services, qui est un problème différent de celui de
 savoir qui est l'humain à l'autre bout.
+
+## 24. Un débit dont on ignore l'issue n'est pas un refus
+
+Le premier jet traitait de la même façon les deux erreurs que `accounts` peut
+produire : le paiement était décliné, que le service ait refusé le mouvement ou
+qu'il n'ait rien répondu du tout. C'était faux, et faux d'une manière qui se
+compte en argent.
+
+Un refus nommé — solde insuffisant, wallet gelé, devise différente — est une
+réponse : le service est debout, il a évalué la demande, rien n'a bougé.
+Décliner est correct, et l'état est terminal.
+
+Une absence de réponse n'est pas une réponse. `accounts` a pu appliquer le débit
+et perdre le chemin du retour. Décliner revient alors à clore le paiement sur
+des fonds qui ont réellement quitté le wallet, sans que personne ne repasse
+jamais dessus, puisque `Declined` est terminal. Le paiement reste donc
+`Processing`, ce qui est exactement ce que le réconciliateur cherche.
+
+Restait le symétrique, plus vicieux. Un paiement `Processing` sans référence de
+débit recouvre deux mondes opposés : le processus est mort avant d'envoyer le
+débit, ou après que celui-ci a été appliqué mais avant d'en enregistrer la
+référence. Rembourser dans le premier cas crée de l'argent. Aucun état local ne
+permet de les distinguer, parce que l'information n'est pas là : elle est chez
+`accounts`.
+
+D'où la lecture `GET /accounts/:reference/movements/:transaction_id`, sous la
+clé d'idempotence du débit. Elle rend la question posable sans effet de bord, et
+donne trois réponses au lieu de deux : le mouvement existe, il n'existe pas, ou
+on ne sait toujours pas. Le troisième cas ne décide rien et laisse le paiement
+tel quel — ce qui est la bonne réponse quand on ignore, et ce qu'aucun booléen
+n'aurait su exprimer.
+
+L'alternative sans nouvel endpoint était de rejouer le débit sous la même clé :
+idempotent, donc il renvoie le mouvement d'origine s'il existe. Elle a été
+écartée parce qu'elle *applique* le débit quand il n'a jamais eu lieu — pour le
+rembourser aussitôt. Le solde final serait juste, au prix de deux lignes de
+ledger inventées à chaque réparation. Un ledger qui raconte une histoire qui
+n'a pas eu lieu est un ledger auquel on ne peut plus se fier.

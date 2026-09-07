@@ -91,6 +91,23 @@ export class WalletsService {
     return { wallet, user_reference: wallet.user.reference };
   }
 
+  /**
+   * Answers one question, and only that one: has this idempotency key already
+   * produced a movement on this wallet?
+   *
+   * An orchestrator that lost the answer to a debit cannot tell "it never
+   * happened" from "it happened and the response was lost" — and the two need
+   * opposite repairs. Rather than guess, it asks here. The lookup is a read:
+   * it can be run at any time, on any key, without moving a franc.
+   */
+  async findMovement(reference: string, transactionId: string): Promise<LedgerEntry | null> {
+    const wallet = await this.wallets.findByReference(reference);
+    if (!wallet) {
+      throw new WalletNotFoundException({ reference });
+    }
+    return this.ledger.findByIdempotencyKey(wallet.id, transactionId);
+  }
+
   credit(reference: string, request: BalanceOperationRequest): Promise<BalanceOperationResponse> {
     return this.applyMovement(reference, request, TransactionType.CREDIT);
   }

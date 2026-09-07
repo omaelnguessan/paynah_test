@@ -87,6 +87,35 @@ export class AccountsHttpClient implements AccountsPort {
     return this.movement('credit', wallet, money, idempotencyKey, details);
   }
 
+  /**
+   * The read that lets the saga stop guessing. A 404 is an answer — the key
+   * moved nothing — so it comes back as `null` rather than as a failure. Only
+   * a genuine inability to reach `accounts` is an error here, because "I do not
+   * know" and "it did not happen" must never collapse into the same value.
+   */
+  async findMovement(wallet: Reference, idempotencyKey: string): Promise<MovementResult | null> {
+    const url = `${this.baseUrl}/accounts/${wallet.value}/movements/${encodeURIComponent(idempotencyKey)}`;
+
+    try {
+      const payload = await this.breaker.execute(() => this.read(url));
+      return payload ? toMovementResult(payload) : null;
+    } catch (error) {
+      if (error instanceof CircuitOpenError) {
+        throw new AccountsUnavailableError('find-movement', 'circuit open');
+      }
+      this.logger.error(
+        {
+          operation: 'find-movement',
+          wallet_reference: wallet.value,
+          correlation_id: this.correlation.current,
+          cause: describe(error),
+        },
+        'could not establish whether the movement exists',
+      );
+      throw new AccountsUnavailableError('find-movement', describe(error));
+    }
+  }
+
   private async movement(
     operation: 'debit' | 'credit',
     wallet: Reference,
@@ -188,6 +217,48 @@ export class AccountsHttpClient implements AccountsPort {
           'retrying an accounts call',
         );
         await sleep(delay);
+      }
+    }
+
+    throw lastError;
+  }
+
+  /** The same retry policy as a movement, on a call that changes nothing. */
+  private async read(url: string): Promise<BalanceOperationPayload | null> {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      try {
+        const response = await firstValueFrom(
+          this.http
+            .get<AccountsEnvelope<BalanceOperationPayload>>(url, {
+              headers: {
+                ...this.credentials,
+                [CORRELATION_ID_HEADER]: this.correlation.current,
+              },
+              validateStatus: () => true,
+            })
+            .pipe(timeout(this.timeoutMs)),
+        );
+
+        // The key has never moved money here. That is a fact, not a failure.
+        if (response.status === 404) {
+          return null;
+        }
+        if (response.status >= 400) {
+          throw new UpstreamHttpError(response.status, response.data?.message ?? 'unknown');
+        }
+        if (!response.data?.data) {
+          throw new UpstreamHttpError(response.status, 'empty payload');
+        }
+        return response.data.data;
+      } catch (error) {
+        lastError = error;
+        const shape = shapeOf(error);
+        if (!isRetryable(shape) || attempt === this.maxAttempts) {
+          break;
+        }
+        await sleep(backoffDelay(attempt, { baseMs: 100, maxMs: this.timeoutMs }));
       }
     }
 

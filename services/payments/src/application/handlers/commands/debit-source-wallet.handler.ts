@@ -1,5 +1,6 @@
 import { Inject, Logger } from '@nestjs/common';
 import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
 import { DomainError } from '../../../domain/errors/domain.error';
 import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
 import { Reference } from '../../../domain/model/reference';
@@ -21,6 +22,10 @@ import { failureReasonOf } from '../../services/failure-reason';
  * A refusal from `accounts` is a business outcome, not an exception to swallow:
  * the payment is declined and persisted, and the error is rethrown so the saga
  * stops rather than carrying on to the credit.
+ *
+ * An *unreachable* `accounts` is a different animal and is deliberately not
+ * declined. The debit may have been applied and only its answer lost, so the
+ * payment is left Processing for the reconciler to settle against the truth.
  */
 @CommandHandler(DebitSourceWalletCommand)
 export class DebitSourceWalletHandler implements ICommandHandler<DebitSourceWalletCommand> {
@@ -65,13 +70,31 @@ export class DebitSourceWalletHandler implements ICommandHandler<DebitSourceWall
       if (!(error instanceof DomainError)) {
         throw error;
       }
+
+      if (error instanceof AccountsUnavailableError) {
+        // A refusal and a lost answer are not the same event. `accounts` may
+        // have applied the debit and failed on the way back, and declining here
+        // would close the payment over money that has already left the wallet.
+        // The payment stays Processing, which is exactly what the reconciler
+        // looks for — it will ask `accounts` what really happened.
+        this.logger.error(
+          {
+            payment_reference: payment.reference.value,
+            source_wallet_reference: payment.source.value,
+            cause: error.code,
+          },
+          'the debit outcome is unknown, leaving the payment for reconciliation',
+        );
+        throw error;
+      }
+
       payment.decline(failureReasonOf(error));
       await this.transaction.run(() => this.payments.save(payment));
       this.events.publishAll(payment.pullEvents());
 
       this.logger.warn(
         { payment_reference: payment.reference.value, failure_reason: payment.failureReason },
-        'payment declined at the debit step',
+        'payment declined at the debit step, nothing moved',
       );
       throw error;
     }

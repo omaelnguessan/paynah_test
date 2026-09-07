@@ -20,6 +20,7 @@ import {
   ResponseMessage,
 } from '@paynad/shared';
 import { InternalApiKeyGuard } from '../common/guards/internal-api-key.guard';
+import { MovementNotFoundException } from './wallets.exceptions';
 import { BalanceOperationRequest } from './dto/balance-operation.request';
 import { BalanceOperationResponse } from './dto/balance-operation.response';
 import { BalanceResponse } from './dto/balance.response';
@@ -114,6 +115,49 @@ export class WalletsController {
   ): Promise<BalanceResponse> {
     const { wallet, user_reference } = await this.wallets.getWithOwner(reference);
     return BalanceResponse.from(wallet, user_reference);
+  }
+
+  @Get(':reference/movements/:transaction_id')
+  @InternalThrottle()
+  @UseGuards(InternalApiKeyGuard)
+  @ApiOperation({
+    summary: '[internal] Look up a movement by its idempotency key',
+    description:
+      'The read an orchestrator needs after losing the answer to a credit or a debit: it ' +
+      'says whether the key already moved money on this wallet, and it never moves any itself.',
+  })
+  @ApiHeader({ name: 'x-api-key', required: true })
+  @ApiHeader({ name: 'x-api-secret', required: true })
+  @ApiParam(WALLET_REFERENCE)
+  @ApiParam({ name: 'transaction_id', example: 'pay_01hq3m8x0000zt7k9d2v4bqf1c' })
+  @ApiEnvelopeResponse({
+    status: 200,
+    code: ResponseCode.SUCCESS,
+    message: ResponseMessage.SUCCESS,
+    model: BalanceOperationResponse,
+    description: 'The key produced this movement',
+  })
+  @ApiEnvelopeResponse({
+    status: 404,
+    code: ResponseCode.TRANSACTION_NOT_FOUND,
+    message: ResponseMessage.TRANSACTION_NOT_FOUND,
+    description: 'This key has never moved money on this wallet',
+  })
+  @ApiEnvelopeResponse({
+    status: 401,
+    code: ResponseCode.VALIDATION_FAILED,
+    message: ResponseMessage.VALIDATION_FAILED,
+    description: 'Missing or invalid x-api-key / x-api-secret',
+  })
+  async movement(
+    @Param('reference', new ReferencePipe(ReferencePrefix.WALLET)) reference: string,
+    @Param('transaction_id') transactionId: string,
+  ): Promise<BalanceOperationResponse> {
+    const entry = await this.wallets.findMovement(reference, transactionId);
+    if (!entry) {
+      throw new MovementNotFoundException({ reference, transaction_id: transactionId });
+    }
+    return BalanceOperationResponse.approved(entry);
   }
 
   @Post(':reference/credit')

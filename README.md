@@ -486,6 +486,14 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $ACCOUNTS/accounts/$SOURCE/debi
 
 `credit` est le même appel avec l'autre verbe dans le chemin.
 
+Et pour savoir si une clé a déjà servi, sans rien déplacer :
+
+```bash
+curl -s $ACCOUNTS/accounts/$SOURCE/movements/demo-debit-0001 \
+  -H "x-api-key: $KEY" -H "x-api-secret: $SECRET"
+# 200 avec le mouvement, ou 404 TRANSACTION_NOT_FOUND si la clé n'a rien produit
+```
+
 ### `payments` : lancer un paiement
 
 Le seul endpoint dont un client a réellement besoin. `transaction_id` est le
@@ -624,6 +632,7 @@ d'environnement par la requête qui l'a produite : rien n'est à recopier à la 
 | GET | `/accounts/:reference/balance` | public |
 | POST | `/accounts/:reference/credit` | **interne** |
 | POST | `/accounts/:reference/debit` | **interne** |
+| GET | `/accounts/:reference/movements/:transaction_id` | **interne** |
 
 Les deux endpoints de mouvement sont réservés à `payments`. Ils sont protégés
 par `InternalApiKeyGuard`, qui compare `x-api-key` et `x-api-secret` à
@@ -647,6 +656,12 @@ réessaie sur timeout, donc un rejeu doit être gratuit :
 
 La clé est portée par le wallet, ce qui permet à la saga de réutiliser un même
 `transaction_id` pour le débit sur la source et le crédit sur la destination.
+
+La même clé se relit : `GET /accounts/:reference/movements/:transaction_id` dit
+si elle a déjà déplacé de l'argent sur ce wallet, et ne déplace rien lui-même.
+C'est la lecture dont un orchestrateur a besoin quand il a perdu la réponse à un
+débit, parce que « ça n'a pas eu lieu » et « ça a eu lieu et la réponse s'est
+perdue » appellent des réparations opposées.
 
 ### Concurrence
 
@@ -915,6 +930,36 @@ sequenceDiagram
 
 `CompensationPending` n'est délibérément pas terminal. Tous les autres états de
 fin le sont.
+
+### Quand `accounts` ne répond plus
+
+Un refus et une absence de réponse ne sont pas le même événement, et la
+différence se compte en argent. Le client HTTP traduit les deux dans le
+vocabulaire du domaine, et la saga les traite séparément.
+
+| Moment de la panne | Ce qui se passe | État final | L'argent |
+|--------------------|-----------------|------------|----------|
+| avant le débit, refus nommé (`INSUFFICIENT_BALANCE`, `WALLET_FROZEN`, …) | le service a répondu : rien n'a bougé | `Declined`, terminal | intact |
+| avant le débit, aucune réponse | on ignore si le débit a été appliqué | `Processing`, repris par le réconciliateur | à déterminer |
+| pendant le crédit | la source est déjà à découvert, seul le remboursement est correct | `Compensated` | mouvement net nul |
+| pendant le remboursement | le remboursement reste dû | `CompensationPending`, non terminal | dû |
+| processus tué en pleine saga | le paiement est déjà durable | `Processing` | à déterminer |
+
+Les trois lignes qui finissent « à déterminer » ont la même suite : le
+réconciliateur les reprend une minute plus tard et **demande à `accounts`**
+plutôt que de supposer. `GET /accounts/:reference/movements/:transaction_id`
+répond sous la clé d'idempotence du débit :
+
+- **un mouvement existe** : le débit était passé et seule sa réponse s'est
+  perdue. La référence est enregistrée, puis le paiement est compensé ;
+- **aucun mouvement** : rien n'a jamais quitté le wallet, donc le paiement est
+  décliné **sans remboursement** — créditer ici inventerait de l'argent ;
+- **`accounts` toujours injoignable** : rien n'est décidé, le paiement reste en
+  l'état et la passe suivante repose la question.
+
+C'est la raison d'être de cette lecture : `Processing` sans référence de débit
+recouvre deux mondes opposés, et aucun état local ne permet de les distinguer.
+Seul le service qui détient le solde le sait.
 
 ### Idempotence
 
