@@ -1,8 +1,11 @@
 # Décisions
 
-Les choix qui méritent d'être discutés, et pourquoi ils ont été tranchés ainsi.
-Quand une décision s'écarte de la réponse évidente, c'est dit franchement plutôt
-qu'enfoui.
+Ce fichier est ma trace écrite : les choix sur lesquels j'ai hésité, ce que j'ai
+écarté, et pourquoi. Je l'ai tenu au fur et à mesure, pas reconstitué à la fin —
+d'où quelques entrées qui racontent une erreur avant de donner la solution.
+
+Quand une décision s'écarte de la réponse évidente, je le dis plutôt que de le
+noyer.
 
 ---
 
@@ -197,9 +200,9 @@ Les séparer achète trois choses concrètes :
 transactionnel : un `UPDATE` conditionnel, une insertion au ledger, terminé.
 `transactions` est un ajout et une lecture paginée. Ajouter un bus de commandes à
 l'un ou à l'autre reviendrait à remplacer un appel de méthode par une commande,
-un handler, un enregistrement de bus et une ligne de câblage de module, soit de
-l'indirection sans rien de l'autre côté. CQRS répond à une asymétrie ; là où la
-charge est symétrique, ce n'est que du cérémonial.
+un handler, un enregistrement de bus et une ligne de câblage de module. J'ai
+fait le test mentalement sur `transactions` : je n'ai rien trouvé que ça
+améliore. CQRS répond à une asymétrie de charge, et il n'y en a pas ici.
 
 ## 7. Pas d'event sourcing
 
@@ -300,8 +303,10 @@ honnête dans l'énumération telle qu'elle était, et en étiqueter un en
 
 La saga dérive ses clés d'idempotence de la référence du paiement : `pay_01hq…`
 pour le débit, `pay_01hq…:credit`, `pay_01hq…:refund`. Le jeu de caractères
-d'origine (`[A-Za-z0-9-]`) n'autorisait ni l'un ni l'autre, si bien qu'`accounts`
-rejetait chaque mouvement émis par la saga.
+d'origine (`[A-Za-z0-9-]`) n'autorisait ni le tiret bas ni les deux-points, si
+bien qu'`accounts` refusait chaque mouvement émis par la saga avec un banal
+`VALIDATION_FAILED`. J'ai cherché du côté de la saga pendant un bon moment avant
+de regarder le décorateur.
 
 Élargir le jeu de caractères a été préféré à la déformation des clés, parce que
 la clé devient alors auto-descriptive : un coup d'œil à un mouvement dans
@@ -425,11 +430,19 @@ la rend aussi versionnée, testée et lisible au même endroit que la route
 qu'elle protège : `POST /payments` porte son budget dans sa signature.
 
 Le stockage est en mémoire, donc par instance : deux répliques doublent le
-plafond effectif. C'est assumé et écrit dans le README. `@nestjs/throttler`
-accepte un stockage Redis derrière la même interface, si bien que passer à une
-fenêtre partagée changera un adaptateur et pas une ligne d'appel. Poser un Redis
-dans la stack aujourd'hui aurait ajouté un composant à exploiter pour un
-bénéfice qui n'existe qu'à partir de la deuxième réplique.
+plafond effectif. C'est assumé, et écrit dans le README plutôt que découvert
+plus tard. `@nestjs/throttler` accepte un stockage Redis derrière la même
+interface, donc le jour venu c'est un adaptateur à changer, pas un appel. Poser
+un Redis maintenant aurait ajouté un composant à exploiter pour un bénéfice qui
+n'existe qu'à partir de la deuxième instance.
+
+Un détail que je n'avais pas vu venir : un guard global voit **tous** les
+contextes d'exécution, y compris les livraisons RabbitMQ que `transactions`
+consomme dans la même application. Ma première version appelait
+`switchToHttp()` sans se poser de question et faisait tomber le consommateur à
+chaque message. Ce sont les tests e2e qui l'ont trouvé — cinq scénarios rouges
+et un service mort dans les logs. Le guard laisse maintenant passer tout ce qui
+n'est pas HTTP, et un test le verrouille.
 
 ## 22. Le débit est compté par identifiant quand il y en a un
 
@@ -469,6 +482,10 @@ savoir qui est l'humain à l'autre bout.
 
 ## 24. Un débit dont on ignore l'issue n'est pas un refus
 
+J'ai trouvé ces deux défauts en écrivant la documentation des cas de panne, pas
+en écrivant le code : c'est en essayant de remplir le tableau « qui se passe
+quoi quand `accounts` tombe » que deux cases se sont révélées fausses.
+
 Le premier jet traitait de la même façon les deux erreurs que `accounts` peut
 produire : le paiement était décliné, que le service ait refusé le mouvement ou
 qu'il n'ait rien répondu du tout. C'était faux, et faux d'une manière qui se
@@ -498,9 +515,9 @@ on ne sait toujours pas. Le troisième cas ne décide rien et laisse le paiement
 tel quel — ce qui est la bonne réponse quand on ignore, et ce qu'aucun booléen
 n'aurait su exprimer.
 
-L'alternative sans nouvel endpoint était de rejouer le débit sous la même clé :
-idempotent, donc il renvoie le mouvement d'origine s'il existe. Elle a été
-écartée parce qu'elle *applique* le débit quand il n'a jamais eu lieu — pour le
-rembourser aussitôt. Le solde final serait juste, au prix de deux lignes de
-ledger inventées à chaque réparation. Un ledger qui raconte une histoire qui
-n'a pas eu lieu est un ledger auquel on ne peut plus se fier.
+J'ai d'abord voulu éviter le nouvel endpoint en rejouant simplement le débit
+sous la même clé : c'est idempotent, donc ça renvoie le mouvement d'origine s'il
+existe. Sauf que si le débit n'a jamais eu lieu, ce « rejeu » l'applique pour de
+bon, et il faut le rembourser dans la foulée. Le solde final serait juste, avec
+deux lignes de ledger inventées à chaque réparation. J'ai préféré vingt lignes
+de plus dans `accounts`.

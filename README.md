@@ -2,7 +2,12 @@
 
 Trois microservices NestJS indépendants, une base PostgreSQL chacun, reliés par
 du REST synchrone pour le mouvement d'argent et par RabbitMQ pour le ledger.
-L'ensemble tourne en local avec Docker Compose.
+Tout tourne en local avec Docker Compose.
+
+J'ai écrit ce README pour qu'on puisse reprendre le projet sans moi. Il explique
+donc autant les raisons que le fonctionnement, et il dit aussi ce qui ne marche
+pas encore : voir [Sécurité](#sécurité) et [Ce que je ferais
+ensuite](#ce-que-je-ferais-ensuite).
 
 ```mermaid
 flowchart TB
@@ -58,7 +63,10 @@ make migrate              # applique les migrations TypeORM des trois bases
 make seed                 # charge les jeux de données de développement
 ```
 
-`make up && make migrate && make seed` : c'est tout ce dont un clone frais a besoin.
+`make up && make migrate && make seed` : c'est tout ce dont un clone frais a
+besoin. Si `make up` s'arrête sur un port déjà pris, c'est en général un
+PostgreSQL local sur 5433-5435 ; changez les `*_DB_EXPOSED_PORT` dans `.env`
+plutôt que de tuer le vôtre.
 
 | Surface           | URL                              |
 |-------------------|----------------------------------|
@@ -87,10 +95,12 @@ volontairement variés :
 | Salif Diallo | Compte bloqué | 10 000 | Frozen | le chemin `WALLET_FROZEN`, et le cas de compensation |
 
 `transactions` et `payments` chargent leur propre historique : un débit, le
-remboursement qui le compense, un crédit, et un paiement par état terminal. Les
-paiements du seed sont construits en faisant traverser à l'agrégat des
-transitions légales plutôt qu'en insérant des lignes ; un jeu de données que la
-machine à états refuserait est un jeu de données qui ment.
+remboursement qui le compense, un crédit, et un paiement par état terminal.
+
+Les paiements du seed sont construits en faisant traverser à l'agrégat des
+transitions légales, pas en insérant des lignes directement. C'est un peu plus
+long à écrire, mais ça garantit qu'aucune fixture ne décrit un état que le code
+refuserait de produire.
 
 ## Environnement
 
@@ -151,12 +161,13 @@ tables d'un autre ; les seuls passages d'une frontière sont REST et AMQP.
 ## Développement
 
 `docker compose` prend automatiquement `docker-compose.override.yml`, donc
-`make up` donne déjà le rechargement à chaud. Dans chaque conteneur de
-développement, deux compilateurs tournent en watch, celui du service et celui de
-`packages/shared`, et le processus lui-même tourne sous `node --watch`, qui
-redémarre dès qu'un fichier qu'il a chargé change. C'est pour cela qu'une
-modification dans `packages/shared` recharge les trois services, ce que le
-`--watch` de Nest ne sait pas faire puisqu'il ne suit que les sources du service.
+`make up` donne déjà le rechargement à chaud.
+
+Le montage est un peu inhabituel : dans chaque conteneur, deux compilateurs
+tournent en watch (le service et `packages/shared`) et le processus tourne sous
+`node --watch`. J'y suis venu parce que le `--watch` de Nest ne suit que les
+sources du service : une modification dans `packages/shared` ne rechargeait
+rien, et je passais mon temps à redémarrer les conteneurs à la main.
 
 Les debuggers Node sont attachés aux ports 9229 (accounts), 9230 (transactions)
 et 9231 (payments). Sous VS Code : « Attach to Node » sur le port correspondant.
@@ -192,10 +203,12 @@ de la stack démarrée et migrée ; `make test:e2e-isolated` amène la sienne.
 | Bout en bout | les trois services + PostgreSQL + RabbitMQ | ce qui survit à une frontière | la stack entière |
 
 `services/payments` impose un plancher de **80 % d'instructions, de branches, de
-fonctions et de lignes sur `domain/` et `application/`** via `coverageThreshold` ;
-la suite se situe aujourd'hui près de 99 % d'instructions sur les deux. Les
-barils de réexport et les doublures de test sont exclus : ils gonflent un
-chiffre sans rien dire du code testé.
+fonctions et de lignes sur `domain/` et `application/`** via `coverageThreshold`.
+On est aujourd'hui autour de 99 % d'instructions sur les deux, mais le seuil
+reste à 80 : c'est un garde-fou, pas un objectif à afficher.
+
+Les barils de réexport et les doublures de test sont sortis de la mesure, sinon
+le chiffre monte sans qu'une seule assertion ait été ajoutée.
 
 La couche d'intégration utilise `nock` plutôt qu'un client bouchonné, donc le
 vrai pipeline axios, le vrai opérateur `timeout()` et le vrai breaker sont
@@ -205,7 +218,9 @@ le circuit s'ouvre après N échecs consécutifs puis échoue immédiatement, et
 rafale de refus ne l'ouvre jamais, parce qu'un refus signifie qu'`accounts` est
 debout et répond.
 
-Cinq scénarios de bout en bout portent l'essentiel :
+Cinq scénarios de bout en bout portent l'essentiel. Ce sont eux qui ont trouvé
+les vrais bugs du projet, les tests unitaires n'ayant jamais rien attrapé de
+sérieux :
 
 1. **Un paiement aboutit** : les deux soldes bougent, le paiement est `Approved`,
    et exactement deux lignes atteignent le ledger, une par wallet.
@@ -769,9 +784,9 @@ remboursement, puis un crédit.
 | GET | `/payments/:reference` | lire son état |
 | GET | `/payments` | listing d'administration, paginé |
 
-C'est le service pour lequel les deux autres existent, et celui qui a été écrit
-pour être lu. [DECISIONS.md](DECISIONS.md) argumente les choix ; cette section
-dit ce qui est là.
+C'est le service pour lequel les deux autres existent, et celui où j'ai passé le
+plus de temps. [DECISIONS.md](DECISIONS.md) argumente les choix ; cette section
+décrit ce qui est là.
 
 ### Architecture propre, vérifiée plutôt que décrite
 
@@ -786,10 +801,12 @@ src/
 Les imports ne pointent que vers l'intérieur. C'est garanti deux fois : par
 `no-restricted-imports` dans `services/payments/.eslintrc.json`, et par
 `src/architecture.spec.ts`, qui analyse chaque instruction d'import réelle et
-**fait échouer le build** en cas de violation. Une règle de lint se désactive en
-ligne ; un test rouge, non. La suite vérifie aussi son propre cas négatif :
-ajouter `@nestjs/common` à `domain/model/money.ts` la fait passer au rouge, parce
-qu'un garde-fou incapable d'échouer ne prouve rien.
+fait échouer le build en cas de violation.
+
+Pourquoi les deux ? Parce qu'une règle de lint se désactive avec un commentaire,
+et que je me connais. Le test, lui, vérifie aussi son propre cas négatif : si on
+ajoute `@nestjs/common` à `domain/model/money.ts`, il doit passer au rouge. Un
+garde-fou qu'on n'a jamais vu échouer ne rassure pas beaucoup.
 
 Cinq représentations, jamais confondues, avec un mapper explicite entre chaque
 paire :
@@ -1035,8 +1052,8 @@ $ docker compose logs | grep corr-trace-1788724469
 
 ## Sécurité
 
-Ce qui protège la plateforme, et ce qui n'est pas encore résolu. La seconde
-liste est aussi importante que la première.
+Ce qui protège la plateforme, et ce qui ne la protège pas encore. La seconde
+liste est la plus utile des deux si vous reprenez le projet.
 
 ### Limitation de débit
 
@@ -1077,9 +1094,10 @@ Deux détails qui comptent plus qu'il n'y paraît :
   appelant dont il faut se défendre, et un 429 sur une probe ressemble à une
   panne.
 - **Une livraison RabbitMQ traverse le guard sans être comptée.** `transactions`
-  consomme le broker à travers la même application ; un guard global qui
-  supposait du HTTP faisait tomber le consommateur à chaque message. Le débit de
-  la file se règle par le prefetch, ce qui est le travail du broker.
+  consomme le broker à travers la même application, et un guard global voit
+  aussi ces contextes-là. Ma première version supposait du HTTP et faisait
+  tomber le consommateur à chaque message ; ce sont les tests e2e qui l'ont
+  attrapé, pas moi. Le débit de la file se règle par le prefetch, côté broker.
 
 `TRUST_PROXY` décide si `X-Forwarded-For` fait foi. Vide, l'en-tête est ignoré :
 une valeur que n'importe qui peut envoyer ne doit pas décider qui est limité.
@@ -1134,14 +1152,17 @@ d'en-têtes. Les propriétés suivantes sont, elles aussi, des contrôles :
 
 ### Ce qui n'est pas résolu
 
-- **Il n'y a pas d'authentification de bout d'utilisateur.** `POST /payments`
-  n'exige aucun jeton : qui connaît une référence de wallet peut demander un
-  paiement depuis ce wallet. Le guard interne protège la frontière
-  `payments → accounts`, pas la porte d'entrée. C'est le manque le plus
-  important du projet, et il se comble par une couche d'authentification
-  (jeton porteur, wallet rattaché à son propriétaire, vérification que
-  l'appelant possède le wallet source) — un chantier à part entière, pas une
-  rustine.
+Je préfère le dire ici plutôt que laisser quelqu'un le découvrir en production.
+
+- **Il n'y a pas d'authentification utilisateur.** `POST /payments` n'exige aucun
+  jeton : qui connaît une référence de wallet peut demander un paiement depuis ce
+  wallet. Le guard interne protège la frontière `payments → accounts`, pas la
+  porte d'entrée. C'est le plus gros manque du projet. J'ai préféré ne rien poser
+  du tout plutôt qu'un JWT décoratif : sans modèle de propriété des wallets, un
+  jeton valide n'empêche personne de débiter le compte du voisin. Le vrai
+  correctif tient en trois pièces (jeton signé, lien wallet → propriétaire déjà
+  en base, vérification dans la couche présentation), et c'est un chantier, pas
+  une rustine.
 - **Le compteur de débit est en mémoire, par instance.** Deux répliques
   doublent le plafond effectif. Une fenêtre partagée dans Redis règle cela sans
   changer une ligne d'appel : seul l'adaptateur de stockage change.
@@ -1149,6 +1170,9 @@ d'en-têtes. Les propriétés suivantes sont, elles aussi, des contrôles :
   production ils devraient venir d'un coffre, et tourner.
 - **Pas de journal d'audit des accès.** Les mouvements sont tracés, les
   tentatives d'accès refusées ne le sont qu'en log applicatif.
+- **Le rate limiter compte par IP.** Derrière un NAT, plusieurs clients partagent
+  un seau. C'est le compromis habituel tant qu'il n'y a pas d'identité : une fois
+  l'authentification en place, le compteur devrait porter sur l'utilisateur.
 
 ## Les points non négociables, et où chacun est garanti
 
@@ -1170,6 +1194,26 @@ d'en-têtes. Les propriétés suivantes sont, elles aussi, des contrôles :
 | Chaque endpoint interne est protégé | `InternalApiKeyGuard` sur `credit` et `debit` ; un appel sans identifiants est un 401 |
 | Les cinq scénarios e2e passent | `services/payments/test/payments.e2e-spec.ts`, lancés par `make test:e2e-isolated` |
 | Un `correlation_id` suit un paiement à travers les trois services | `x-correlation-id` en entrée, créé s'il manque, renvoyé en sortie, porté par chaque appel sortant et dans chaque message d'outbox |
+
+## Ce que je ferais ensuite
+
+Par ordre de ce que je prendrais en premier si je reprenais le projet demain.
+
+1. **L'authentification** (voir plus haut). Rien d'autre ne compte tant que la
+   porte d'entrée est ouverte.
+2. **Métriques et tracing.** Il y a des logs corrélés, ce qui suffit pour
+   déboguer un paiement, pas pour répondre à « combien de paiements par minute
+   et quelle latence au p99 ». Prometheus plus OpenTelemetry, une journée.
+3. **Les crons en multi-instance.** Le relais d'outbox et le réconciliateur
+   supposent aujourd'hui une seule instance : deux répliques feraient le travail
+   en double. Un `SELECT … FOR UPDATE SKIP LOCKED` sur les lots règle les deux,
+   et le breaker comme le rate limiter demanderaient un Redis partagé.
+4. **Une CI.** Tout est prêt (`make test`, `make test:e2e-isolated`), il manque
+   le fichier de workflow.
+5. **La rétention.** `idempotency_keys` et `outbox` grossissent indéfiniment.
+   Une purge des lignes publiées de plus de 30 jours, et c'est réglé.
+6. **Le versionnement de l'API.** Aucun préfixe `/v1` aujourd'hui, ce qui sera
+   pénible le jour où un champ doit changer de forme.
 
 ## Docker
 
