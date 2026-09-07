@@ -118,6 +118,13 @@ la première requête.
 | `TRANSACTIONS_SERVICE_URL` | `http://transactions:3002` | payments |
 | `HTTP_TIMEOUT_MS` | `3000` | payments vers accounts |
 | `HTTP_MAX_RETRIES` | `2` | payments vers accounts |
+| `RATE_LIMIT_TTL_MS` | `60000` | la fenêtre de comptage, les trois services |
+| `RATE_LIMIT_LIMIT` | `6000` en développement, `120` par défaut dans le code | budget d'une route ordinaire |
+| `RATE_LIMIT_STRICT_LIMIT` | `3000` en développement, `20` par défaut | budget d'une route qui crée ou déplace |
+| `RATE_LIMIT_INTERNAL_LIMIT` | `12000` en développement, `1200` par défaut | budget d'un appelant interne authentifié |
+| `TRUST_PROXY` | vide | nombre de proxies devant, ou plage d'adresses à croire |
+| `CORS_ORIGINS` | vide | origines navigateur autorisées ; vide = aucune |
+| `SWAGGER_ENABLED` | vide | expose `/docs` même en production |
 
 Les deux identifiants internes sont les seuls secrets du système, ils
 n'apparaissent jamais dans le code, et ils protègent les endpoints de débit et
@@ -305,6 +312,7 @@ trient donc chronologiquement dans un index et restent lisibles au téléphone.
 | `4005` | `CURRENCY_MISMATCH` | 422 |
 | `4006` | `DUPLICATE_TRANSACTION` | 409 |
 | `4007` | `IDEMPOTENCY_CONFLICT` | 409 |
+| `4009` | `RATE_LIMIT_EXCEEDED` | 429 |
 | `5000` | `INTERNAL_ERROR` | 500 |
 | `5001` | `UPSTREAM_UNAVAILABLE` | 503 |
 
@@ -979,6 +987,123 @@ $ docker compose logs | grep corr-trace-1788724469
   transactions-1   TransactionsEventsController    movement appended to the ledger
   transactions-1   TransactionsEventsController    movement appended to the ledger
 ```
+
+## Sécurité
+
+Ce qui protège la plateforme, et ce qui n'est pas encore résolu. La seconde
+liste est aussi importante que la première.
+
+### Limitation de débit
+
+Chaque service compte les requêtes par appelant et par fenêtre, en mémoire,
+avec `@nestjs/throttler` et un guard global. Trois budgets, une seule fenêtre :
+
+| Budget | Défaut | Routes |
+|--------|--------|--------|
+| ordinaire | 120 / minute | les lectures, les listings |
+| strict | 20 / minute | `POST /users`, `POST /accounts`, `POST /payments`, `POST /transactions` |
+| interne | 1 200 / minute | `POST /accounts/:ref/credit` et `/debit` |
+
+Le budget strict couvre ce qui crée une ressource ou déplace de l'argent : ce
+sont les routes dont l'abus coûte des lignes en base, pas seulement du CPU. Le
+budget interne est large à dessein, parce que la saga émet deux ou trois
+mouvements par paiement ; un plafond public y étranglerait le trafic de la
+plateforme elle-même bien avant d'arrêter qui que ce soit.
+
+L'identité comptée est l'adresse IP, **sauf** quand l'appelant présente une
+`x-api-key` : le compteur porte alors sur une empreinte de cette clé. Un service
+amont authentifié ne partage donc pas son seau avec l'internet public au motif
+qu'il sort par la même adresse, et une clé qui fuiterait resterait plafonnée
+pour elle seule.
+
+Un refus sort par l'enveloppe commune, comme n'importe quel autre échec :
+
+```json
+{ "code": "4009", "message": "RATE_LIMIT_EXCEEDED", "data": null }
+```
+
+avec un en-tête `Retry-After` en secondes. L'enveloppe ne dit pas où en est le
+compteur : renseigner un appelant sur sa marge restante ne l'aide qu'à se
+maintenir juste en dessous.
+
+Deux détails qui comptent plus qu'il n'y paraît :
+
+- **`/health` n'est jamais limité.** Un orchestrateur qui sonde n'est pas un
+  appelant dont il faut se défendre, et un 429 sur une probe ressemble à une
+  panne.
+- **Une livraison RabbitMQ traverse le guard sans être comptée.** `transactions`
+  consomme le broker à travers la même application ; un guard global qui
+  supposait du HTTP faisait tomber le consommateur à chaque message. Le débit de
+  la file se règle par le prefetch, ce qui est le travail du broker.
+
+`TRUST_PROXY` décide si `X-Forwarded-For` fait foi. Vide, l'en-tête est ignoré :
+une valeur que n'importe qui peut envoyer ne doit pas décider qui est limité.
+Derrière un proxy que vous contrôlez, mettez-y le nombre de sauts, sans quoi
+tous les clients partagent un seul seau.
+
+### Durcissement HTTP
+
+`applyHttpHardening` s'applique aux trois services avant qu'ils n'écoutent :
+
+| Mesure | Effet |
+|--------|-------|
+| `helmet` | en-têtes de sécurité, `X-Powered-By` retiré, pas de sniffing de type |
+| Corps limité à 64 ko | un payload plat n'a aucune raison d'être plus gros ; au-delà, la requête est refusée avant d'atteindre un handler |
+| CORS fermé par défaut | aucune origine navigateur n'est autorisée tant que `CORS_ORIGINS` est vide |
+| Swagger conditionnel | `/docs` cartographie toute la surface d'attaque en une page : servi hors production, ou sur `SWAGGER_ENABLED=true` |
+
+### Ce que le domaine garantit déjà
+
+La sécurité d'une plateforme de paiement n'est pas seulement une affaire
+d'en-têtes. Les propriétés suivantes sont, elles aussi, des contrôles :
+
+- **Aucune injection SQL possible** : chaque requête passe par TypeORM avec des
+  paramètres liés, y compris l'`UPDATE` conditionnel du solde. Aucune
+  concaténation de chaîne ne construit du SQL.
+- **Aucun solde négatif atteignable** : la garde est dans le `WHERE`, donc
+  aucune course ne peut la contourner, ce que dix paiements concurrents
+  vérifient à chaque exécution des tests.
+- **Aucun mouvement rejouable** : la contrainte unique
+  `(wallet_id, transaction_id)` fait qu'un débit rejoué ne débite pas deux fois.
+- **Aucun mouvement modifiable** : un trigger interdit `UPDATE` et `DELETE` sur
+  les deux tables de ledger, y compris depuis `psql`.
+- **Aucune fuite par les erreurs** : le filtre global journalise les détails et
+  ne renvoie qu'un code applicatif. Une clé rejetée, une route inconnue et une
+  requête sans périmètre répondent toutes `VALIDATION_FAILED` ; seul le statut
+  HTTP les distingue.
+- **Comparaison des identifiants à temps constant** : `timingSafeEqual` sur les
+  deux moitiés, longueur repliée dans le résultat plutôt que court-circuitée.
+- **Identifiant de corrélation contraint** : il est renvoyé dans un en-tête,
+  transmis en amont et écrit dans chaque log, donc il est validé
+  (`[A-Za-z0-9._:-]{1,128}`) et remplacé s'il ne l'est pas, jamais « nettoyé ».
+- **En-têtes et secrets jamais journalisés** : `x-api-key`, `x-api-secret` et
+  `authorization` sont expurgés par le logger.
+- **Refus de démarrer en production sur les identifiants du dépôt** : une valeur
+  contenant `change-me`, `dev-internal` ou `paynad_pwd` arrête le processus au
+  démarrage, où l'erreur coûte un déploiement raté plutôt qu'un incident.
+- **Bases et broker sur la boucle locale** : les ports PostgreSQL et RabbitMQ
+  sont publiés sur `127.0.0.1`, pas sur toutes les interfaces de la machine.
+- **Pagination bornée** : `per_page` est plafonné à 100 et `page` à 10 000, pour
+  qu'un `OFFSET` profond ne devienne pas une façon peu coûteuse de faire
+  travailler la base.
+
+### Ce qui n'est pas résolu
+
+- **Il n'y a pas d'authentification de bout d'utilisateur.** `POST /payments`
+  n'exige aucun jeton : qui connaît une référence de wallet peut demander un
+  paiement depuis ce wallet. Le guard interne protège la frontière
+  `payments → accounts`, pas la porte d'entrée. C'est le manque le plus
+  important du projet, et il se comble par une couche d'authentification
+  (jeton porteur, wallet rattaché à son propriétaire, vérification que
+  l'appelant possède le wallet source) — un chantier à part entière, pas une
+  rustine.
+- **Le compteur de débit est en mémoire, par instance.** Deux répliques
+  doublent le plafond effectif. Une fenêtre partagée dans Redis règle cela sans
+  changer une ligne d'appel : seul l'adaptateur de stockage change.
+- **Pas de gestion de secrets.** Les identifiants viennent de `.env` ; en
+  production ils devraient venir d'un coffre, et tourner.
+- **Pas de journal d'audit des accès.** Les mouvements sont tracés, les
+  tentatives d'accès refusées ne le sont qu'en log applicatif.
 
 ## Les points non négociables, et où chacun est garanti
 

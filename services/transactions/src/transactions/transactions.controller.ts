@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpStatus, Param, Post, Query, Res } from '@nes
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
 import {
   ApiEnvelopeResponse,
+  StrictThrottle,
   PaginatedData,
   ReferencePipe,
   ReferencePrefix,
@@ -23,6 +24,9 @@ interface ResponseLike {
 export class TransactionsController {
   constructor(private readonly transactions: TransactionsService) {}
 
+  // The fallback write path: the queue is the normal one, so a burst here is
+  // either a retry storm or someone probing.
+  @StrictThrottle()
   @Post()
   @ApiOperation({
     summary: 'Record a movement',

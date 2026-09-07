@@ -16,6 +16,8 @@ export const ResponseCode = {
   CURRENCY_MISMATCH: '4005',
   DUPLICATE_TRANSACTION: '4006',
   IDEMPOTENCY_CONFLICT: '4007',
+  /** Too many requests from one caller in the current window. */
+  RATE_LIMIT_EXCEEDED: '4009',
 
   INTERNAL_ERROR: '5000',
   UPSTREAM_UNAVAILABLE: '5001',

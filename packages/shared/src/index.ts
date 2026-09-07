@@ -9,5 +9,6 @@ export * from './logging';
 export * from './messaging';
 export * from './persistence';
 export * from './pipes';
+export * from './security';
 export * from './swagger';
 export * from './utils';

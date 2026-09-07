@@ -19,6 +19,13 @@ x-app-common: &app-common
     RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${RABBITMQ_HOST}:${RABBITMQ_PORT}
     INTERNAL_API_KEY: ${INTERNAL_API_KEY}
     INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
+    RATE_LIMIT_TTL_MS: ${RATE_LIMIT_TTL_MS}
+    RATE_LIMIT_LIMIT: ${RATE_LIMIT_LIMIT}
+    RATE_LIMIT_STRICT_LIMIT: ${RATE_LIMIT_STRICT_LIMIT}
+    RATE_LIMIT_INTERNAL_LIMIT: ${RATE_LIMIT_INTERNAL_LIMIT}
+    TRUST_PROXY: ${TRUST_PROXY}
+    CORS_ORIGINS: ${CORS_ORIGINS}
+    SWAGGER_ENABLED: ${SWAGGER_ENABLED}
 
 x-app-healthcheck: &app-healthcheck
   test:
@@ -42,7 +49,9 @@ services:
       POSTGRES_USER: ${ACCOUNTS_DB_USER}
       POSTGRES_PASSWORD: ${ACCOUNTS_DB_PASSWORD}
     ports:
-      - '${ACCOUNTS_DB_EXPOSED_PORT}:5432'
+      # Loopback only: a database is for inspection from this machine, never
+      # something to expose on whatever network the host happens to sit on.
+      - '127.0.0.1:${ACCOUNTS_DB_EXPOSED_PORT}:5432'
     volumes:
       - pg-accounts-data:/var/lib/postgresql/data
     healthcheck:
@@ -59,7 +68,9 @@ services:
       POSTGRES_USER: ${TRANSACTIONS_DB_USER}
       POSTGRES_PASSWORD: ${TRANSACTIONS_DB_PASSWORD}
     ports:
-      - '${TRANSACTIONS_DB_EXPOSED_PORT}:5432'
+      # Loopback only: a database is for inspection from this machine, never
+      # something to expose on whatever network the host happens to sit on.
+      - '127.0.0.1:${TRANSACTIONS_DB_EXPOSED_PORT}:5432'
     volumes:
       - pg-transactions-data:/var/lib/postgresql/data
     healthcheck:
@@ -76,7 +87,9 @@ services:
       POSTGRES_USER: ${PAYMENTS_DB_USER}
       POSTGRES_PASSWORD: ${PAYMENTS_DB_PASSWORD}
     ports:
-      - '${PAYMENTS_DB_EXPOSED_PORT}:5432'
+      # Loopback only: a database is for inspection from this machine, never
+      # something to expose on whatever network the host happens to sit on.
+      - '127.0.0.1:${PAYMENTS_DB_EXPOSED_PORT}:5432'
     volumes:
       - pg-payments-data:/var/lib/postgresql/data
     healthcheck:
@@ -95,8 +108,8 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
       RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
     ports:
-      - '${RABBITMQ_EXPOSED_PORT}:5672'
-      - '${RABBITMQ_MANAGEMENT_PORT}:15672'
+      - '127.0.0.1:${RABBITMQ_EXPOSED_PORT}:5672'
+      - '127.0.0.1:${RABBITMQ_MANAGEMENT_PORT}:15672'
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:

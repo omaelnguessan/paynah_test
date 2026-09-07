@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
 import {
   ApiEnvelopeResponse,
+  StrictThrottle,
   ReferencePipe,
   ReferencePrefix,
   ResponseCode,
@@ -16,6 +17,8 @@ import { UsersService } from './users.service';
 export class UsersController {
   constructor(private readonly users: UsersService) {}
 
+  // Account creation is the cheapest way to fill someone else's database.
+  @StrictThrottle()
   @Post()
   @ApiOperation({ summary: 'Create a user' })
   @ApiEnvelopeResponse({

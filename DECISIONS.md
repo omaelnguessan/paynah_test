@@ -30,6 +30,9 @@ qu'enfoui.
 | [18](#18-le-plancher-de-couverture-est-appliqué-et-il-exclut-les-barils) | Un plancher de 80 % appliqué, barils exclus | Un chiffre de couverture dans un rapport | Un seuil incapable de faire échouer le build est un chiffre que personne ne lit ; les barils le gonflent sans une seule assertion de plus. |
 | [19](#19-les-assertions-sur-le-ledger-interrogent-en-boucle-elles-nattendent-pas) | Une interrogation en boucle avec échéance | Un `sleep` fixe | Cohérent à terme par construction : une attente fixe est soit lente à chaque exécution, soit instable le jour où elle est trop courte. |
 | [20](#20-lenvironnement-est-validé-avec-class-validator-et-non-joi) | Environnement validé avec `class-validator` | Joi | La même garantie d'échec immédiat, avec le vocabulaire de validation déjà employé par tous les DTO : une bibliothèque, un jeu de règles, un format d'erreur. |
+| [21](#21-la-limitation-de-débit-vit-dans-lapplication-pas-devant-elle) | La limitation de débit est **dans** le service, en mémoire | Une règle sur un reverse proxy, ou un compteur Redis dès maintenant | Une API se défend même quand on l'atteint directement, et le budget voyage avec le code qui sait ce qu'une route coûte. Le stockage partagé est un adaptateur à changer le jour où il y a plusieurs répliques, pas une raison de ne rien poser. |
+| [22](#22-le-débit-est-compté-par-identifiant-quand-il-y-en-a-un) | Compteur porté par la clé d'API interne quand elle est présente, par l'IP sinon | Compter tout le monde par IP | Un service amont sort par une seule adresse et émet trois mouvements par paiement : compté comme une IP publique, il s'auto-étrangle avant que quiconque n'attaque. |
+| [23](#23-lauthentification-de-lutilisateur-final-est-absente-et-cest-dit) | Pas d'authentification utilisateur, et c'est documenté | Poser un JWT vite fait pour cocher la case | Une couche d'authentification décorative donne l'illusion du contrôle sans modèle de propriété des wallets. Le manque est nommé, avec la forme qu'aurait le correctif. |
 
 ---
 
@@ -404,3 +407,61 @@ lieu de deux. Les règles se lisent comme celles des DTO, le format d'erreur est
 le même, et il n'y a pas un second langage de schéma à tenir à jour avec
 `.env.example`. Ajouter Joi à côté aurait acheté un nom familier au prix d'un
 vocabulaire parallèle pour la seule chose qui ne doit jamais se contredire.
+
+## 21. La limitation de débit vit dans l'application, pas devant elle
+
+Le compteur est un guard NestJS, en mémoire, dans chacun des trois services.
+L'alternative habituelle est une règle sur le reverse proxy, et elle a de vrais
+avantages : elle coûte zéro CPU applicatif et elle protège même quand le
+processus est saturé.
+
+Elle a surtout un défaut ici. Les trois services se parlent à l'intérieur du
+réseau, sans passer par le proxy, et rien ne garantit qu'un déploiement futur
+place le même proxy devant chacun. Une API qui ne se défend que derrière un
+équipement se retrouve nue le jour où on l'atteint directement, ce qui est
+exactement ce que fait la suite de bout en bout. Placer la règle dans le code
+la rend aussi versionnée, testée et lisible au même endroit que la route
+qu'elle protège : `POST /payments` porte son budget dans sa signature.
+
+Le stockage est en mémoire, donc par instance : deux répliques doublent le
+plafond effectif. C'est assumé et écrit dans le README. `@nestjs/throttler`
+accepte un stockage Redis derrière la même interface, si bien que passer à une
+fenêtre partagée changera un adaptateur et pas une ligne d'appel. Poser un Redis
+dans la stack aujourd'hui aurait ajouté un composant à exploiter pour un
+bénéfice qui n'existe qu'à partir de la deuxième réplique.
+
+## 22. Le débit est compté par identifiant quand il y en a un
+
+Le compteur porte sur l'adresse IP de l'appelant, sauf quand celui-ci présente
+une `x-api-key` : le seau est alors dérivé de cette clé.
+
+Compter tout le monde par IP paraît plus simple et se comporte mal. `payments`
+sort par une seule adresse et émet deux à trois mouvements par paiement : avec
+un plafond public, la plateforme s'étranglerait elle-même bien avant qu'un
+attaquant ne s'en approche. À l'inverse, plusieurs clients derrière un même NAT
+partageraient un seau qu'aucun d'eux ne remplit seul.
+
+Ce n'est pas la clé qui sert de compteur mais une empreinte courte et non
+réversible : un identifiant de seau ne doit jamais devenir un secret qui se
+promène dans un log ou dans un chemin d'erreur. Et la clé reste vérifiée par le
+guard : le compteur choisit un seau, il n'authentifie personne.
+
+## 23. L'authentification de l'utilisateur final est absente, et c'est dit
+
+`POST /payments` n'exige aucun jeton. Qui connaît une référence de wallet peut
+demander un paiement depuis ce wallet. C'est le manque le plus important de la
+plateforme, et il est documenté plutôt que masqué.
+
+La tentation était de poser un JWT rapidement pour cocher la case. Cela aurait
+produit un contrôle décoratif : sans modèle de propriété — un utilisateur, ses
+wallets, et la vérification que l'appelant possède bien le wallet source — un
+jeton valide n'empêche personne de débiter le compte du voisin. La question
+n'est pas « y a-t-il un jeton », elle est « ce porteur a-t-il le droit de
+déplacer cet argent-là ».
+
+La forme du correctif est connue et tient en trois pièces : une identité portée
+par un jeton signé et court, un lien `wallet → propriétaire` déjà présent en
+base, et une vérification dans la couche présentation de `payments` avant que la
+commande ne soit construite. Le guard interne actuel reste à sa place : il
+protège la frontière entre services, qui est un problème différent de celui de
+savoir qui est l'humain à l'autre bout.

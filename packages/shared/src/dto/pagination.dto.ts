@@ -4,14 +4,21 @@ import { IsInt, IsOptional, Max, Min, ValidateIf } from 'class-validator';
 
 export const DEFAULT_PER_PAGE = 20;
 export const MAX_PER_PAGE = 100;
+/**
+ * A page number is not free: PostgreSQL still walks the rows an OFFSET skips.
+ * Deep paging is capped rather than left as a cheap way to make the database
+ * work hard; a caller that far in wants a filter, not page 900 000.
+ */
+export const MAX_PAGE = 10_000;
 
 /** Flat, snake_case query contract shared by every paginated endpoint. */
 export class PaginationQueryDto {
-  @ApiPropertyOptional({ minimum: 1, default: 1, nullable: true })
+  @ApiPropertyOptional({ minimum: 1, maximum: MAX_PAGE, default: 1, nullable: true })
   @ValidateIf((_, value) => value !== null && value !== undefined)
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   @IsOptional()
   page?: number | null;
 

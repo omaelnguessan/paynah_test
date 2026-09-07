@@ -33,6 +33,11 @@ x-app-test: &app-test
     INTERNAL_API_SECRET: test-internal-secret-0123456789-0123456789
     ACCOUNTS_SERVICE_URL: http://accounts:3001
     TRANSACTIONS_SERVICE_URL: http://transactions:3002
+    # The suites hammer the API on purpose; the limiter has its own unit tests.
+    RATE_LIMIT_TTL_MS: 60000
+    RATE_LIMIT_LIMIT: 100000
+    RATE_LIMIT_STRICT_LIMIT: 100000
+    RATE_LIMIT_INTERNAL_LIMIT: 100000
 
 x-app-healthcheck: &app-healthcheck
   test:

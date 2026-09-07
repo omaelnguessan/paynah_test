@@ -1,5 +1,6 @@
 import { Controller, Get } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, IsNull } from 'typeorm';
 import { ApiEnvelopeResponse, ResponseCode, ResponseMessage } from '@paynad/shared';
@@ -7,6 +8,9 @@ import { OutboxOrmEntity } from '../../infrastructure/persistence/entities/outbo
 import { HealthDto } from './health.dto';
 
 @ApiTags('health')
+// Probes must never be rate limited: an orchestrator polling health is not
+// a caller to defend against, and a 429 here would look like an outage.
+@SkipThrottle()
 @Controller('health')
 export class HealthController {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}

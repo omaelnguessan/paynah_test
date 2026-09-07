@@ -141,3 +141,18 @@ export class InternalErrorException extends AppException {
     );
   }
 }
+
+/**
+ * The caller has spent its budget for the current window. `Retry-After` is set
+ * by the guard; the envelope carries no counter, since telling a caller exactly
+ * how close it is to the ceiling only helps it sit right under it.
+ */
+export class RateLimitExceededException extends AppException {
+  constructor() {
+    super(
+      ResponseCode.RATE_LIMIT_EXCEEDED,
+      ResponseMessage.RATE_LIMIT_EXCEEDED,
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+}

@@ -1,4 +1,5 @@
 import { plainToInstance } from 'class-transformer';
+import { assertNoPlaceholderSecrets } from '@paynad/shared';
 import { IsInt, IsNotEmpty, IsString, Max, Min, MinLength, validateSync } from 'class-validator';
 
 /**
@@ -60,6 +61,25 @@ export class EnvConfig {
   @Min(0)
   @Max(10)
   HTTP_MAX_RETRIES: number = 2;
+
+  /** Rate limiting: window length, and the two budgets inside it. */
+  @IsInt()
+  @Min(1_000)
+  RATE_LIMIT_TTL_MS: number = 60_000;
+
+  @IsInt()
+  @Min(1)
+  RATE_LIMIT_LIMIT: number = 120;
+
+  @IsInt()
+  @Min(1)
+  RATE_LIMIT_STRICT_LIMIT: number = 20;
+
+  /** The internal endpoints are called by the platform itself, and burst. */
+  @IsInt()
+  @Min(1)
+  RATE_LIMIT_INTERNAL_LIMIT: number = 1_200;
+
 }
 
 export function validateEnv(raw: Record<string, unknown>): EnvConfig {
@@ -74,5 +94,6 @@ export function validateEnv(raw: Record<string, unknown>): EnvConfig {
       .join('\n  ');
     throw new Error(`Invalid environment for the payments service:\n  ${details}`);
   }
+  assertNoPlaceholderSecrets(config);
   return config;
 }
