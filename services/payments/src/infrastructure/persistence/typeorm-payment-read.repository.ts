@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+import { Currency } from '../../domain/model/money';
+import { FailureReason, PaymentStatus } from '../../domain/model/payment-status';
 import {
   PaymentReadPort,
   PaymentView,
@@ -41,7 +43,27 @@ export class TypeOrmPaymentReadRepository implements PaymentReadPort {
   }
 }
 
-/** `bigint` arrives as a string from the driver; the view model normalises it. */
+/**
+ * The view speaks the database's column names; the port speaks the domain's.
+ * Spreading the row used to be enough because both sides happened to use the
+ * wire format — which is precisely the coupling this mapper now absorbs.
+ */
 function toView(row: PaymentReadModel): PaymentView {
-  return { ...row, amount: Number(row.amount) };
+  return {
+    reference: row.reference,
+    transactionId: row.transaction_id,
+    // `bigint` arrives as a string from the driver.
+    amount: Number(row.amount),
+    currency: row.currency as Currency,
+    description: row.description,
+    sourceWallet: row.source_wallet_reference,
+    destinationWallet: row.destination_wallet_reference,
+    status: row.status as PaymentStatus,
+    failureReason: row.failure_reason as FailureReason | null,
+    debitTransactionReference: row.debit_transaction_reference,
+    creditTransactionReference: row.credit_transaction_reference,
+    refundTransactionReference: row.refund_transaction_reference,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+  };
 }

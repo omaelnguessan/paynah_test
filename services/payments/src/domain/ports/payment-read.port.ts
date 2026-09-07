@@ -1,27 +1,35 @@
+import { Currency } from '../model/money';
+import { FailureReason, PaymentStatus } from '../model/payment-status';
+
 /**
  * The read side. Queries never hydrate the `Payment` aggregate: they read a
- * denormalised projection whose shape is driven by what the API returns, so the
- * write model can change without breaking a single query.
+ * projection whose fields are named the way the domain names things, not the
+ * way the HTTP contract spells them.
+ *
+ * That distinction matters. An earlier version of this interface carried
+ * `transaction_id` and `source_wallet_reference` — the wire format, in layer 0
+ * — which quietly made the domain depend on the shape of a JSON response. The
+ * translation belongs to the presentation mapper, and it now happens there.
  */
 export interface PaymentView {
   reference: string;
-  transaction_id: string;
+  transactionId: string;
   amount: number;
-  currency: string;
+  currency: Currency;
   description: string;
-  source_wallet_reference: string;
-  destination_wallet_reference: string;
-  status: string;
-  failure_reason: string | null;
-  debit_transaction_reference: string | null;
-  credit_transaction_reference: string | null;
-  refund_transaction_reference: string | null;
-  created_at: Date;
-  completed_at: Date | null;
+  sourceWallet: string;
+  destinationWallet: string;
+  status: PaymentStatus;
+  failureReason: FailureReason | null;
+  debitTransactionReference: string | null;
+  creditTransactionReference: string | null;
+  refundTransactionReference: string | null;
+  createdAt: Date;
+  completedAt: Date | null;
 }
 
 export interface PaymentViewFilter {
-  status?: string | null;
+  status?: PaymentStatus | null;
   sourceWallet?: string | null;
   page: number;
   perPage: number;

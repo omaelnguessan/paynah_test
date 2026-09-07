@@ -567,7 +567,8 @@ curl -s "$PAYMENTS/payments?status=Approved&source_wallet_reference=$SOURCE&page
 { "code": "200", "message": "SUCCESS", "data": { "items": [], "page": 1, "per_page": 20, "total": 137, "has_next": true } }
 ```
 
-Le côté lecture n'hydrate jamais l'agrégat : il interroge une projection.
+Le côté lecture n'hydrate jamais l'agrégat : il interroge une projection, dont
+les noms de champs restent ceux du domaine jusqu'au mapper de présentation.
 
 ### `transactions` : le ledger
 
@@ -818,6 +819,13 @@ paire :
 | `Payment` | domain | les invariants et le comportement |
 | `PaymentOrmEntity` | infrastructure | les `@Column()` et compagnie |
 | `PaymentResponse` | presentation | le contrat sortant |
+
+Six si on compte `PaymentView`, la projection côté lecture. Elle est nommée dans
+le vocabulaire du domaine (`transactionId`, `sourceWallet`) et non dans celui du
+JSON : c'est `PaymentMapper.toResponse` qui traduit, et lui seul. Ce n'était pas
+le cas au départ — le port de lecture portait les noms de l'API, si bien que la
+couche 0 dépendait discrètement de la forme d'une réponse HTTP. Un test du
+mapper vérifie maintenant qu'aucune graphie du domaine ne ressort sur le fil.
 
 `Payment` n'importe rien hors de `domain/`, ce qui permet de tester la machine à
 états entière sans base, sans HTTP et sans Nest : 22 tests, en quelques

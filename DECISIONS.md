@@ -232,7 +232,16 @@ ce dont on ne veut pas sur l'endpoint qu'un client interroge après un
 `POST /payments`. La vue n'a ni l'un ni l'autre problème.
 
 Ce qui compte pour CQRS est préservé : les requêtes ont leur contrat, leur port
-et leur repository, et **elles n'hydratent jamais l'agrégat `Payment`**. Quand le
+et leur repository, et **elles n'hydratent jamais l'agrégat `Payment`**.
+
+Une correction tardive sur ce point. `PaymentView` portait au départ les noms de
+l'API — `transaction_id`, `source_wallet_reference` — donc la forme d'une
+réponse JSON était décrite dans la couche 0, ce qui inverse la règle de
+dépendance sans en avoir l'air. La projection parle maintenant le vocabulaire du
+domaine et c'est `PaymentMapper` qui traduit, avec un test qui échoue si une
+graphie du domaine ressort sur le fil. La leçon vaut plus que le correctif : une
+fuite d'architecture ne ressemble pas à un import interdit, elle ressemble à un
+nom de champ. Quand le
 côté lecture gagnera une jointure, le propriétaire du wallet par exemple, elle
 atterrira dans la définition de la vue sans qu'un seul handler de requête change.
 Si le volume de lecture justifie un jour une table matérialisée, le port reste et

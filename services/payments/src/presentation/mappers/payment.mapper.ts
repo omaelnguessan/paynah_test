@@ -1,6 +1,5 @@
 import { InitiatePaymentCommand } from '../../application/commands/initiate-payment.command';
 import { Currency } from '../../domain/model/money';
-import { PaymentStatus } from '../../domain/model/payment-status';
 import { PaymentView } from '../../domain/ports/payment-read.port';
 import { InitiatePaymentRequest } from '../dto/initiate-payment.request';
 import { PaymentResponse } from '../dto/payment.response';
@@ -27,21 +26,22 @@ export class PaymentMapper {
     );
   }
 
+  /** Domain names in, wire names out. The only place the two ever meet. */
   static toResponse(view: PaymentView): PaymentResponse {
     return {
       reference: view.reference,
-      transaction_id: view.transaction_id,
+      transaction_id: view.transactionId,
       amount: view.amount,
       currency: view.currency as PaymentResponse['currency'],
       description: view.description,
-      source_wallet_reference: view.source_wallet_reference,
-      destination_wallet_reference: view.destination_wallet_reference,
-      status: view.status as PaymentStatus,
-      failure_reason: view.failure_reason,
-      debit_transaction_reference: view.debit_transaction_reference,
-      credit_transaction_reference: view.credit_transaction_reference,
-      created_at: view.created_at.toISOString(),
-      completed_at: view.completed_at ? view.completed_at.toISOString() : null,
+      source_wallet_reference: view.sourceWallet,
+      destination_wallet_reference: view.destinationWallet,
+      status: view.status,
+      failure_reason: view.failureReason,
+      debit_transaction_reference: view.debitTransactionReference,
+      credit_transaction_reference: view.creditTransactionReference,
+      created_at: view.createdAt.toISOString(),
+      completed_at: view.completedAt ? view.completedAt.toISOString() : null,
     };
   }
 }
