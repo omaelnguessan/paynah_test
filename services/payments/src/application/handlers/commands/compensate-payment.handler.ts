@@ -1,6 +1,7 @@
+import { PaymentEvents } from '../../services/payment-events.service';
 import { PAYMENT_EXECUTION, PaymentExecution } from '../../../domain/ports/payment-execution.port';
 import { Inject, Logger } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import { DomainError } from '../../../domain/errors/domain.error';
 import { InvalidTransitionError } from '../../../domain/errors/invalid-transition.error';
 import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
@@ -40,7 +41,7 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
     @Inject(ACCOUNTS_PORT) private readonly accounts: AccountsPort,
     @Inject(TRANSACTIONS_PORT) private readonly ledger: TransactionsPort,
     @Inject(TRANSACTION_RUNNER) private readonly transaction: TransactionRunner,
-    private readonly events: EventBus,
+    private readonly events: PaymentEvents,
   ) {}
 
   async execute(command: CompensatePaymentCommand): Promise<string | null> {
@@ -83,8 +84,9 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
       await this.transaction.run(() => this.payments.save(payment));
     }
 
+    let refund: MovementResult;
     try {
-      const refund = await this.accounts.credit(
+      refund = await this.accounts.credit(
         payment.source,
         payment.money,
         payment.movementKey('refund'),
@@ -92,37 +94,7 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
         // whitelist that no reference could satisfy.
         { description: 'Refund of a failed payment', paymentReference: payment.reference },
       );
-
-      payment.compensate(refund.transactionReference);
-      await this.transaction.run(async () => {
-        await this.payments.save(payment);
-        await this.ledger.record(payment, [
-          {
-            transactionId: payment.movementKey('refund'),
-            paymentReference: payment.reference,
-            type: 'REFUND' as const,
-            wallet: payment.source,
-            movementReference: refund.transactionReference,
-            occurredAt: payment.completedAt ?? new Date(),
-          },
-        ]);
-      });
-      this.events.publishAll(payment.pullEvents());
-
-      this.logger.log(
-        {
-          payment_reference: payment.reference.value,
-          refund_transaction_reference: refund.transactionReference.value,
-        },
-        'payment compensated',
-      );
-      return refund.transactionReference.value;
     } catch (error) {
-      if (payment.status !== PaymentStatus.CompensationPending) {
-        payment.markCompensationPending(FailureReason.CREDIT_FAILED);
-        await this.transaction.run(() => this.payments.save(payment));
-      }
-
       // Money is sitting in the wrong place. This is the one situation in the
       // whole service that needs a human if the reconciler keeps failing.
       this.logger.error(
@@ -137,6 +109,31 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
       );
       return null;
     }
+
+    payment.compensate(refund.transactionReference);
+    await this.transaction.run(async () => {
+      await this.payments.save(payment);
+      await this.ledger.record(payment, [
+        {
+          transactionId: payment.movementKey('refund'),
+          paymentReference: payment.reference,
+          type: 'REFUND' as const,
+          wallet: payment.source,
+          movementReference: refund.transactionReference,
+          occurredAt: payment.completedAt ?? new Date(),
+        },
+      ]);
+      await this.events.enqueue(payment.pullEvents());
+    });
+
+    this.logger.log(
+      {
+        payment_reference: payment.reference.value,
+        refund_transaction_reference: refund.transactionReference.value,
+      },
+      'payment compensated',
+    );
+    return refund.transactionReference.value;
   }
 
   private async reconcileCredit(payment: Payment): Promise<void> {
@@ -179,8 +176,8 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
           occurredAt: payment.completedAt!,
         },
       ]);
+      await this.events.enqueue(payment.pullEvents());
     });
-    this.events.publishAll(payment.pullEvents());
   }
 
   /**
@@ -228,8 +225,10 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
     }
 
     payment.decline(FailureReason.ACCOUNTS_UNAVAILABLE);
-    await this.transaction.run(() => this.payments.save(payment));
-    this.events.publishAll(payment.pullEvents());
+    await this.transaction.run(async () => {
+      await this.payments.save(payment);
+      await this.events.enqueue(payment.pullEvents());
+    });
     this.logger.log(
       { payment_reference: payment.reference.value },
       'the debit never happened, declining without a refund',

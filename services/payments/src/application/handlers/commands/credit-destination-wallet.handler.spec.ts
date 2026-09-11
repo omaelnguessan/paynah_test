@@ -1,5 +1,5 @@
 import { PAYMENT_EXECUTION } from '../../../domain/ports/payment-execution.port';
-import { EventBus } from '@nestjs/cqrs';
+import { PaymentEvents } from '../../services/payment-events.service';
 import { Test } from '@nestjs/testing';
 import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
 import { WalletFrozenError } from '../../../domain/errors/wallet.errors';
@@ -28,7 +28,7 @@ import { CreditDestinationWalletHandler } from './credit-destination-wallet.hand
 describe('CreditDestinationWalletHandler', () => {
   const accounts = { debit: jest.fn(), credit: jest.fn() };
   const ledger = { record: jest.fn() };
-  const events = { publishAll: jest.fn() };
+  const events = { enqueue: jest.fn() };
   /** Records the order of the writes, to prove they share one unit of work. */
   let journal: string[];
 
@@ -53,7 +53,7 @@ describe('CreditDestinationWalletHandler', () => {
         { provide: ACCOUNTS_PORT, useValue: accounts },
         { provide: TRANSACTIONS_PORT, useValue: ledger },
         { provide: TRANSACTION_RUNNER, useValue: transaction },
-        { provide: EventBus, useValue: events },
+        { provide: PaymentEvents, useValue: events },
       ],
     }).compile();
     return { handler: moduleRef.get(CreditDestinationWalletHandler), payments };
@@ -112,16 +112,25 @@ describe('CreditDestinationWalletHandler', () => {
     expect(journal).toEqual(['transaction:begin', 'ledger', 'transaction:commit']);
   });
 
-  it('publishes the approval only after the commit', async () => {
+  it('writes the approval notification before the commit', async () => {
     const payment = aDebitedPayment();
     const { handler } = await handlerFor(payment);
     accounts.credit.mockResolvedValue(movement(CREDIT));
-    events.publishAll.mockImplementation(() => journal.push('published'));
+    events.enqueue.mockImplementation(() => journal.push('published'));
 
     await handler.execute(command(payment));
 
-    expect(journal[journal.length - 1]).toBe('published');
-    expect(events.publishAll).toHaveBeenCalledWith([expect.any(PaymentApprovedEvent)]);
+    expect(journal).toEqual(['transaction:begin', 'ledger', 'published', 'transaction:commit']);
+    expect(events.enqueue).toHaveBeenCalledWith([expect.any(PaymentApprovedEvent)]);
+  });
+
+  it('does not commit the payment when its lifecycle outbox insert fails', async () => {
+    const payment = aDebitedPayment();
+    const { handler } = await handlerFor(payment);
+    accounts.credit.mockResolvedValue(movement(CREDIT));
+    events.enqueue.mockRejectedValue(new Error('outbox unavailable'));
+    await expect(handler.execute(command(payment))).rejects.toThrow('outbox unavailable');
+    expect(journal).not.toContain('transaction:commit');
   });
 
   it('leaves an uncertain credit Processing for reconciliation', async () => {
@@ -137,7 +146,7 @@ describe('CreditDestinationWalletHandler', () => {
     expect(payment.status).toBe(PaymentStatus.Processing);
     expect(payments.saved).toEqual([]);
     expect(ledger.record).not.toHaveBeenCalled();
-    expect(events.publishAll).not.toHaveBeenCalled();
+    expect(events.enqueue).not.toHaveBeenCalled();
   });
 
   it('persists a confirmed refusal before allowing compensation', async () => {

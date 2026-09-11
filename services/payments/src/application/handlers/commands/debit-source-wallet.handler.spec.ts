@@ -1,5 +1,5 @@
 import { PAYMENT_EXECUTION } from '../../../domain/ports/payment-execution.port';
-import { EventBus } from '@nestjs/cqrs';
+import { PaymentEvents } from '../../services/payment-events.service';
 import { Test } from '@nestjs/testing';
 import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
 import { InsufficientBalanceError } from '../../../domain/errors/insufficient-balance.error';
@@ -24,7 +24,7 @@ import { DebitSourceWalletHandler } from './debit-source-wallet.handler';
 
 describe('DebitSourceWalletHandler', () => {
   const accounts = { debit: jest.fn(), credit: jest.fn() };
-  const events = { publishAll: jest.fn() };
+  const events = { enqueue: jest.fn() };
 
   async function handlerFor(stored: Payment | null) {
     const payments = new InMemoryPaymentRepository(stored);
@@ -38,7 +38,7 @@ describe('DebitSourceWalletHandler', () => {
         { provide: PAYMENT_REPOSITORY, useValue: payments },
         { provide: ACCOUNTS_PORT, useValue: accounts },
         { provide: TRANSACTION_RUNNER, useValue: inlineTransaction },
-        { provide: EventBus, useValue: events },
+        { provide: PaymentEvents, useValue: events },
       ],
     }).compile();
     return { handler: moduleRef.get(DebitSourceWalletHandler), payments };
@@ -97,7 +97,7 @@ describe('DebitSourceWalletHandler', () => {
     expect(payment.failureReason).toBe(FailureReason.INSUFFICIENT_BALANCE);
     expect(payments.statuses).toEqual([PaymentStatus.Processing, PaymentStatus.Declined]);
     // The refusal is persisted first, published second.
-    expect(events.publishAll).toHaveBeenCalledWith([expect.any(PaymentDeclinedEvent)]);
+    expect(events.enqueue).toHaveBeenCalledWith([expect.any(PaymentDeclinedEvent)]);
   });
 
   it('never declines a payment whose debit outcome is unknown', async () => {
@@ -115,7 +115,7 @@ describe('DebitSourceWalletHandler', () => {
     expect(payment.status).toBe(PaymentStatus.Processing);
     expect(payment.failureReason).toBeNull();
     expect(payments.statuses).toEqual([PaymentStatus.Processing]);
-    expect(events.publishAll).not.toHaveBeenCalled();
+    expect(events.enqueue).not.toHaveBeenCalled();
   });
 
   it('still declines when accounts refused for a reason it can name', async () => {
@@ -141,7 +141,7 @@ describe('DebitSourceWalletHandler', () => {
     // reconciler — not this handler — decides what the payment becomes.
     expect(payment.status).toBe(PaymentStatus.Processing);
     expect(payments.statuses).toEqual([PaymentStatus.Processing]);
-    expect(events.publishAll).not.toHaveBeenCalled();
+    expect(events.enqueue).not.toHaveBeenCalled();
   });
 
   it('reports a payment that does not exist', async () => {

@@ -1,3 +1,4 @@
+import { PaymentOperations } from './infrastructure/operations/payment-operations';
 import { PAYMENT_EXECUTION } from './domain/ports/payment-execution.port';
 import { PostgresPaymentExecution } from './infrastructure/persistence/postgres-payment-execution';
 import { HttpModule } from '@nestjs/axios';
@@ -12,11 +13,7 @@ import { CompensatePaymentHandler } from './application/handlers/commands/compen
 import { CreditDestinationWalletHandler } from './application/handlers/commands/credit-destination-wallet.handler';
 import { DebitSourceWalletHandler } from './application/handlers/commands/debit-source-wallet.handler';
 import { InitiatePaymentHandler } from './application/handlers/commands/initiate-payment.handler';
-import {
-  PaymentApprovedHandler,
-  PaymentCompensatedHandler,
-  PaymentDeclinedHandler,
-} from './application/handlers/events/payment-lifecycle.handlers';
+import { PaymentEvents } from './application/services/payment-events.service';
 import { GetPaymentByReferenceHandler } from './application/handlers/queries/get-payment-by-reference.handler';
 import { ListPaymentsHandler } from './application/handlers/queries/list-payments.handler';
 import { PaymentSaga } from './application/sagas/payment.saga';
@@ -57,8 +54,6 @@ const COMMAND_HANDLERS = [
 ];
 
 const QUERY_HANDLERS = [GetPaymentByReferenceHandler, ListPaymentsHandler];
-
-const EVENT_HANDLERS = [PaymentApprovedHandler, PaymentDeclinedHandler, PaymentCompensatedHandler];
 
 /**
  * The only place where the layers meet.
@@ -115,13 +110,14 @@ const EVENT_HANDLERS = [PaymentApprovedHandler, PaymentDeclinedHandler, PaymentC
     CorrelationContext,
     OutboxRelay,
     ReconciliationJob,
+    PaymentOperations,
 
     // --- application ---
     PaymentSaga,
     IdempotencyService,
     ...COMMAND_HANDLERS,
     ...QUERY_HANDLERS,
-    ...EVENT_HANDLERS,
+    PaymentEvents,
   ],
 })
 export class PaymentsModule implements NestModule {

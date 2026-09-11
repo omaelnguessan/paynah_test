@@ -1,3 +1,10 @@
+import { Payment } from '../src/domain/model/payment';
+import { aPayment } from '../src/testing/doubles';
+import { FailureReason } from '../src/domain/model/payment-status';
+import { TypeOrmPaymentRepository } from '../src/infrastructure/persistence/typeorm-payment.repository';
+import { TypeOrmOutboxRepository } from '../src/infrastructure/persistence/typeorm-outbox.repository';
+import { PaymentEvents } from '../src/application/services/payment-events.service';
+import { PaymentOperations } from '../src/infrastructure/operations/payment-operations';
 import { PostgresPaymentExecution } from '../src/infrastructure/persistence/postgres-payment-execution';
 import { TransactionContext } from '../src/infrastructure/persistence/transaction-context';
 import { ConcurrentPaymentError } from '../src/domain/errors/concurrent-payment.error';
@@ -541,6 +548,48 @@ describe('payments (e2e)', () => {
       expect(await balanceOf(wallet)).toBe(50_000);
       expect(await ledgerOf(wallet, reference)).toEqual([]);
     }, 60_000);
+  });
+
+  it('rolls back state and lifecycle event together and supports operational redelivery', async () => {
+    const context = new TransactionContext(dataSource);
+    const repository = new TypeOrmPaymentRepository(context);
+    const events = new PaymentEvents(new TypeOrmOutboxRepository(context));
+    const payment = Payment.restore({
+      ...aPayment().toSnapshot(),
+      transactionId: nextKey('atomic'),
+    });
+    await context.run(() => repository.save(payment));
+    payment.decline(FailureReason.WALLET_NOT_FOUND);
+    await expect(
+      context.run(async () => {
+        await repository.save(payment);
+        await events.enqueue(payment.pullEvents());
+        throw new Error('simulated crash before commit');
+      }),
+    ).rejects.toThrow('simulated crash');
+    const recovered = (await repository.findByReference(payment.reference))!;
+    expect(recovered.status).toBe(PaymentStatus.Pending);
+    const [count] = await dataSource.query(
+      'SELECT count(*)::int AS count FROM outbox WHERE aggregate_reference = $1',
+      [payment.reference.value],
+    );
+    expect(count.count).toBe(0);
+    recovered.decline(FailureReason.WALLET_NOT_FOUND);
+    await context.run(async () => {
+      await repository.save(recovered);
+      await events.enqueue(recovered.pullEvents());
+    });
+    // Use a separate exhausted row so the background relay cannot win the race.
+    const [message] = await dataSource.query(
+      `INSERT INTO outbox (aggregate_reference, event_type, payload, attempts)
+      VALUES ($1, 'payment.declined', '{}', 10) RETURNING id`,
+      [payment.reference.value],
+    );
+    const operations = new PaymentOperations(dataSource);
+    expect((await operations.metrics()).outbox_exhausted).toBeGreaterThanOrEqual(1);
+    await expect(operations.retryOutbox(message.id)).resolves.toBe(true);
+    await expect(operations.retryOutbox(message.id)).resolves.toBe(false);
+    await expect(repository.recordRecoveryAttempt(payment.reference, 'test')).resolves.toBe(1);
   });
 
   it('excludes a second worker with a PostgreSQL session lock', async () => {

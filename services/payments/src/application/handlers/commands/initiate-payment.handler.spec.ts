@@ -1,4 +1,3 @@
-import { EventBus } from '@nestjs/cqrs';
 import { Test } from '@nestjs/testing';
 import {
   IdempotencyConflictError,
@@ -23,7 +22,6 @@ import { InitiatePaymentHandler } from './initiate-payment.handler';
 
 describe('InitiatePaymentHandler', () => {
   const saga = { run: jest.fn() };
-  const events = { publishAll: jest.fn() };
   let payments: InMemoryPaymentRepository;
   let keys: InMemoryIdempotencyRepository;
   let handler: InitiatePaymentHandler;
@@ -44,7 +42,6 @@ describe('InitiatePaymentHandler', () => {
           useValue: { run: (work: () => Promise<unknown>) => keys.transaction(work) },
         },
         { provide: PaymentSaga, useValue: saga },
-        { provide: EventBus, useValue: events },
       ],
     }).compile();
     handler = moduleRef.get(InitiatePaymentHandler);

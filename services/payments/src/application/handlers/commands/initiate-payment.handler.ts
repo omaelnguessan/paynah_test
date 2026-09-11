@@ -1,5 +1,5 @@
 import { Inject, Logger } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import { Money } from '../../../domain/model/money';
 import { Payment } from '../../../domain/model/payment';
 import { Reference } from '../../../domain/model/reference';
@@ -26,7 +26,6 @@ export class InitiatePaymentHandler implements ICommandHandler<InitiatePaymentCo
     @Inject(TRANSACTION_RUNNER) private readonly transaction: TransactionRunner,
     private readonly idempotency: IdempotencyService,
     private readonly saga: PaymentSaga,
-    private readonly events: EventBus,
   ) {}
 
   async execute(command: InitiatePaymentCommand): Promise<InitiatePaymentResult> {
@@ -46,7 +45,6 @@ export class InitiatePaymentHandler implements ICommandHandler<InitiatePaymentCo
         // Pending is durable before a single outbound call is made, so a crash
         // mid-saga always leaves something for the reconciler to find.
         await this.transaction.run(() => this.payments.save(payment));
-        this.events.publishAll(payment.pullEvents());
 
         this.logger.log(
           { payment_reference: payment.reference.value, transaction_id: command.transactionId },

@@ -16,7 +16,8 @@
     "migration:generate": "pnpm typeorm migration:generate",
     "migration:run": "pnpm typeorm migration:run",
     "migration:revert": "pnpm typeorm migration:revert",
-    "seed": "ts-node -r tsconfig-paths/register src/seed/seed.ts"
+    "seed": "ts-node -r tsconfig-paths/register src/seed/seed.ts",
+    "ops": "ts-node src/infrastructure/operations/cli.ts"
   },
   "dependencies": {
     "@nestjs/axios": "^3.0.2",

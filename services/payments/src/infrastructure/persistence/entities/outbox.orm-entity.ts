@@ -26,6 +26,9 @@ export class OutboxOrmEntity {
   @Column({ type: 'timestamptz', nullable: true })
   published_at: Date | null;
 
+  @Column({ type: 'timestamptz', default: () => 'now()' })
+  next_attempt_at: Date;
+
   @Column({ type: 'int', default: 0 })
   attempts: number;
 

@@ -1,6 +1,7 @@
+import { PaymentEvents } from '../../services/payment-events.service';
 import { PAYMENT_EXECUTION, PaymentExecution } from '../../../domain/ports/payment-execution.port';
 import { Inject, Logger } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import { InvalidTransitionError } from '../../../domain/errors/invalid-transition.error';
 import { InsufficientBalanceError } from '../../../domain/errors/insufficient-balance.error';
 import {
@@ -39,7 +40,7 @@ export class CreditDestinationWalletHandler implements ICommandHandler<CreditDes
     @Inject(ACCOUNTS_PORT) private readonly accounts: AccountsPort,
     @Inject(TRANSACTIONS_PORT) private readonly ledger: TransactionsPort,
     @Inject(TRANSACTION_RUNNER) private readonly transaction: TransactionRunner,
-    private readonly events: EventBus,
+    private readonly events: PaymentEvents,
   ) {}
 
   async execute(command: CreditDestinationWalletCommand): Promise<string> {
@@ -89,8 +90,8 @@ export class CreditDestinationWalletHandler implements ICommandHandler<CreditDes
     await this.transaction.run(async () => {
       await this.payments.save(payment);
       await this.ledger.record(payment, this.movementsOf(payment, movement.transactionReference));
+      await this.events.enqueue(payment.pullEvents());
     });
-    this.events.publishAll(payment.pullEvents());
 
     this.logger.log(
       {

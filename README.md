@@ -908,8 +908,8 @@ de la suite.
    `CompensationPending` avant remboursement. Un timeout ou une erreur de commit
    laisse `Processing` : la lecture du mouvement `:credit` permet de confirmer
    un succès sans rembourser la source ;
-4. l'approbation et les deux lignes d'outbox commitent **dans une seule
-   transaction**, si bien que le ledger ne peut jamais entendre parler d'un
+4. l’approbation, les deux mouvements de ledger et la notification de cycle de vie
+   commitent **dans une seule transaction**, si bien que le ledger ne peut jamais entendre parler d'un
    paiement que la base a annulé.
 
 Chaque patte porte sa propre clé d'idempotence dérivée de la référence du
@@ -1035,11 +1035,11 @@ laisserait deux requêtes concurrentes conclure toutes les deux que la clé est
 libre :
 
 ```
-INSERT de la clé (contrainte unique)
-  ├─ succès              → exécuter le cas d'usage, puis stocker la réponse
-  └─ violation d'unicité → relire la ligne
+BEGIN → INSERT de la clé ON CONFLICT DO NOTHING
+  ├─ succès → créer Pending + stocker sa référence → COMMIT → démarrer la saga
+  └─ conflit → attendre le commit concurrent, puis relire la ligne
        ├─ empreinte de requête différente → 409 IDEMPOTENCY_CONFLICT
-       ├─ toujours IN_PROGRESS            → 409, la première tentative tourne encore
+       ├─ toujours IN_PROGRESS            → 409, ancienne réservation à réparer
        └─ COMPLETED                       → renvoyer la réponse stockée, inchangée
 ```
 
@@ -1101,7 +1101,6 @@ $ docker compose logs | grep corr-trace-1788724469
   accounts-1       -                               request completed
   payments-1       CreditDestinationWalletHandler  payment approved
   accounts-1       -                               request completed
-  payments-1       PaymentApprovedHandler          lifecycle event queued for publication
   payments-1       OutboxRelay                     outbox message published
   transactions-1   TransactionsEventsController    movement appended to the ledger
   transactions-1   TransactionsEventsController    movement appended to the ledger
@@ -1246,7 +1245,7 @@ Je préfère le dire ici plutôt que laisser quelqu'un le découvrir en producti
 | Le contrôleur ne touche que `commandBus` et `queryBus` | `presentation/payments.controller.ts` : ce sont ses deux seules dépendances |
 | Les commandes renvoient une référence, jamais l'agrégat | `InitiatePaymentResult` vaut `{ reference: string }` |
 | Les requêtes lisent une projection, jamais l'agrégat | `PaymentReadPort` au-dessus de la vue `payment_read_model` |
-| Les événements de domaine sont publiés après commit | `pullEvents()` puis `EventBus.publishAll`, hors de `transaction.run(...)` |
+| Les événements de domaine sont durables avec le paiement | `PaymentEvents.enqueue` est attendu dans `transaction.run(...)` ; le relais publie après commit |
 | Aucun flottant sur un montant, nulle part | colonnes `bigint` avec transformateur entier ; `Money` refuse un non-entier |
 | Chaque endpoint interne est protégé | `InternalApiKeyGuard` sur `credit` et `debit` ; un appel sans identifiants est un 401 |
 | Les cinq scénarios e2e passent | `services/payments/test/payments.e2e-spec.ts`, lancés par `make test:e2e-isolated` |
@@ -1316,3 +1315,33 @@ résolvent le mouvement ou réessaient un remboursement confirmé.
 Un résultat encore inconnu reste en attente, sans remboursement aveugle.
 Les reprises sont espacées de 1, 2, 4… minutes jusqu’à une heure ; dix tentatives
 non résolues produisent `RECONCILIATION NEEDS ATTENTION` dans les logs.
+
+
+### Outbox transactionnel et exploitation
+
+Les événements de cycle de vie sont désormais écrits par `PaymentEvents` dans
+la transaction de l’état et des mouvements comptables. Une erreur d’outbox annule
+la transaction. Le relais ne traite que des lignes commitées et réserve chaque
+message avec `FOR UPDATE SKIP LOCKED`. Les publications ont un délai maximum de
+cinq secondes et les échecs sont réessayés avec un délai progressif. Après dix
+échecs, le message reste conservé et une alerte `OUTBOX NEEDS ATTENTION` est émise.
+
+Depuis `services/payments`, avec l’environnement PostgreSQL du service :
+
+```sh
+pnpm ops metrics
+pnpm ops retry-outbox <uuid-du-message>
+```
+
+`metrics` fournit les messages en attente et épuisés, l’âge du plus ancien,
+les paiements bloqués, les compensations en attente et les reprises nécessitant
+une intervention. Les mêmes métriques sont journalisées chaque minute.
+`retry-outbox` réactive uniquement un message épuisé non publié, après correction
+de la cause de l’échec. Son identifiant et son payload sont conservés ; les
+consommateurs doivent rester idempotents car un accusé broker peut être perdu.
+Ces outils locaux utilisent les droits PostgreSQL de l’opérateur et n’ajoutent
+aucune route publique.
+
+Appliquer les quatre nouvelles migrations avant le démarrage des nouvelles
+instances. Arrêter d’abord les anciennes instances payments pour la réparation
+d’idempotence. Aucun changement d’authentification n’est inclus.

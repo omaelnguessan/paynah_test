@@ -2,7 +2,8 @@ import { Inject, Injectable, Logger, OnApplicationShutdown } from '@nestjs/commo
 import { Cron } from '@nestjs/schedule';
 import { ClientProxy } from '@nestjs/microservices';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, IsNull, LessThan } from 'typeorm';
+import { DataSource } from 'typeorm';
+import { lastValueFrom, timeout } from 'rxjs';
 import { OutboxOrmEntity } from '../persistence/entities/outbox.orm-entity';
 import { OUTBOX_BATCH_SIZE, OUTBOX_MAX_ATTEMPTS } from './outbox.constants';
 import { TRANSACTIONS_CLIENT } from './messaging.tokens';
@@ -43,52 +44,54 @@ export class OutboxRelay implements OnApplicationShutdown {
   }
 
   private async publishBatch(): Promise<void> {
-    const repository = this.dataSource.getRepository(OutboxOrmEntity);
-    const pending = await repository.find({
-      where: { published_at: IsNull(), attempts: LessThan(OUTBOX_MAX_ATTEMPTS) },
-      order: { created_at: 'ASC' },
-      take: OUTBOX_BATCH_SIZE,
-    });
-
-    for (const message of pending) {
-      try {
-        // `emit` resolves once the broker has accepted the message.
-        await new Promise<void>((resolve, reject) => {
-          this.client.emit(message.event_type, message.payload).subscribe({
-            error: reject,
-            complete: resolve,
-          });
-        });
+    for (let index = 0; index < OUTBOX_BATCH_SIZE; index++) {
+      const found = await this.dataSource.transaction(async (manager) => {
+        // Each worker owns one row until broker acknowledgement and commit.
+        // A crash after acknowledgement can replay it: consumers stay idempotent.
+        const [message]: OutboxOrmEntity[] = await manager.query(
+          `SELECT * FROM outbox WHERE published_at IS NULL AND attempts < $1
+           AND next_attempt_at <= now() ORDER BY created_at
+           LIMIT 1 FOR UPDATE SKIP LOCKED`,
+          [OUTBOX_MAX_ATTEMPTS],
+        );
+        if (!message) return false;
+        const repository = manager.getRepository(OutboxOrmEntity);
+        try {
+          await lastValueFrom(
+            this.client.emit(message.event_type, message.payload).pipe(timeout(5000)),
+            { defaultValue: undefined },
+          );
+        } catch (error) {
+          const attempts = message.attempts + 1;
+          await repository.update(
+            { id: message.id },
+            {
+              attempts,
+              last_error: describe(error),
+              next_attempt_at: new Date(Date.now() + Math.min(3600, 2 ** attempts) * 1000),
+            },
+          );
+          this.logger[attempts >= OUTBOX_MAX_ATTEMPTS ? 'error' : 'warn'](
+            { outbox_id: message.id, payment_reference: message.aggregate_reference, attempts },
+            attempts >= OUTBOX_MAX_ATTEMPTS
+              ? 'OUTBOX NEEDS ATTENTION'
+              : 'outbox publication deferred',
+          );
+          return true;
+        }
+        // A database error here rolls back the attempt; it must never mark a
+        // broker failure or discard a message that might need redelivery.
         await repository.update(
           { id: message.id },
-          { published_at: new Date(), attempts: message.attempts + 1, last_error: null },
-        );
-        this.logger.log(
           {
-            payment_reference: message.aggregate_reference,
-            event_type: message.event_type,
-            correlation_id: (message.payload as { correlation_id?: string }).correlation_id,
+            published_at: new Date(),
+            attempts: message.attempts + 1,
+            last_error: null,
           },
-          'outbox message published',
         );
-      } catch (error) {
-        const attempts = message.attempts + 1;
-        await repository.update(
-          { id: message.id },
-          { attempts, last_error: describe(error) },
-        );
-        const exhausted = attempts >= OUTBOX_MAX_ATTEMPTS;
-        this.logger[exhausted ? 'error' : 'warn'](
-          {
-            payment_reference: message.aggregate_reference,
-            event_type: message.event_type,
-            attempts,
-          },
-          exhausted
-            ? 'outbox message abandoned after too many attempts, it needs a human'
-            : 'outbox message could not be published, will retry',
-        );
-      }
+        return true;
+      });
+      if (!found) break;
     }
   }
 

@@ -581,3 +581,14 @@ CompensationPending réessaie le remboursement. Les états terminaux sont ignor�
 Chaque essai persiste son compteur, sa dernière erreur et une prochaine échéance
 avec délai exponentiel plafonné à une heure. Après dix essais non résolus, une
 alerte de niveau erreur demande une intervention, sans abandonner les réessais.
+
+
+## 29. Les notifications partagent désormais la transaction métier
+
+Cette décision remplace la publication EventBus après commit des décisions 3
+et 10 : tous les événements de cycle de vie sont inscrits et attendus dans
+l’outbox pendant la transaction du paiement. Une panne ne peut plus laisser
+un changement d’état sans sa notification. Le relais verrouille une ligne à la
+fois et conserve les messages dont les tentatives sont épuisées. Une commande
+locale les réactive sans changer leur identité, et les métriques d’exploitation
+sont disponibles en JSON ainsi que dans les logs périodiques.

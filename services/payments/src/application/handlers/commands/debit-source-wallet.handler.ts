@@ -1,8 +1,9 @@
+import { PaymentEvents } from '../../services/payment-events.service';
 import { InvalidTransitionError } from '../../../domain/errors/invalid-transition.error';
 import { PaymentStatus } from '../../../domain/model/payment-status';
 import { PAYMENT_EXECUTION, PaymentExecution } from '../../../domain/ports/payment-execution.port';
 import { Inject, Logger } from '@nestjs/common';
-import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { CommandHandler, ICommandHandler } from '@nestjs/cqrs';
 import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
 import { DomainError } from '../../../domain/errors/domain.error';
 import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
@@ -36,7 +37,7 @@ export class DebitSourceWalletHandler implements ICommandHandler<DebitSourceWall
     @Inject(PAYMENT_REPOSITORY) private readonly payments: PaymentRepository,
     @Inject(ACCOUNTS_PORT) private readonly accounts: AccountsPort,
     @Inject(TRANSACTION_RUNNER) private readonly transaction: TransactionRunner,
-    private readonly events: EventBus,
+    private readonly events: PaymentEvents,
   ) {}
 
   async execute(command: DebitSourceWalletCommand): Promise<string> {
@@ -99,8 +100,10 @@ export class DebitSourceWalletHandler implements ICommandHandler<DebitSourceWall
       }
 
       payment.decline(failureReasonOf(error));
-      await this.transaction.run(() => this.payments.save(payment));
-      this.events.publishAll(payment.pullEvents());
+      await this.transaction.run(async () => {
+        await this.payments.save(payment);
+        await this.events.enqueue(payment.pullEvents());
+      });
 
       this.logger.warn(
         { payment_reference: payment.reference.value, failure_reason: payment.failureReason },

@@ -63,13 +63,14 @@ export class TypeOrmPaymentRepository implements PaymentRepository {
 
   async recordRecoveryAttempt(reference: Reference, error: string | null): Promise<number> {
     return this.context.run(async () => {
-      const rows: Array<{ reconciliation_attempts: number }> = await this.context.manager.query(
-        `UPDATE payments SET reconciliation_attempts = reconciliation_attempts + 1,
+      const [rows]: [Array<{ reconciliation_attempts: number }>, number] =
+        await this.context.manager.query(
+          `UPDATE payments SET reconciliation_attempts = reconciliation_attempts + 1,
          last_reconciliation_error = $2,
          next_reconciliation_at = now() + least(3600, 60 * power(2, least(reconciliation_attempts, 6))) * interval '1 second'
          WHERE reference = $1 RETURNING reconciliation_attempts`,
-        [reference.value, error?.slice(0, 2000) ?? null],
-      );
+          [reference.value, error?.slice(0, 2000) ?? null],
+        );
       return rows[0]?.reconciliation_attempts ?? 0;
     });
   }

@@ -1,5 +1,5 @@
 import { PAYMENT_EXECUTION } from '../../../domain/ports/payment-execution.port';
-import { EventBus } from '@nestjs/cqrs';
+import { PaymentEvents } from '../../services/payment-events.service';
 import { Test } from '@nestjs/testing';
 import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
 import { InvalidTransitionError } from '../../../domain/errors/invalid-transition.error';
@@ -30,7 +30,7 @@ import { CompensatePaymentHandler } from './compensate-payment.handler';
 describe('CompensatePaymentHandler', () => {
   const accounts = { debit: jest.fn(), credit: jest.fn(), findMovement: jest.fn() };
   const ledger = { record: jest.fn() };
-  const events = { publishAll: jest.fn() };
+  const events = { enqueue: jest.fn() };
 
   async function handlerFor(stored: Payment | null) {
     const payments = new InMemoryPaymentRepository(stored);
@@ -45,7 +45,7 @@ describe('CompensatePaymentHandler', () => {
         { provide: ACCOUNTS_PORT, useValue: accounts },
         { provide: TRANSACTIONS_PORT, useValue: ledger },
         { provide: TRANSACTION_RUNNER, useValue: inlineTransaction },
-        { provide: EventBus, useValue: events },
+        { provide: PaymentEvents, useValue: events },
       ],
     }).compile();
     return { handler: moduleRef.get(CompensatePaymentHandler), payments };
@@ -92,7 +92,7 @@ describe('CompensatePaymentHandler', () => {
       movementReference: REFUND,
       transactionId: `${payment.reference.value}:refund`,
     });
-    expect(events.publishAll).toHaveBeenCalledWith([expect.any(PaymentCompensatedEvent)]);
+    expect(events.enqueue).toHaveBeenCalledWith([expect.any(PaymentCompensatedEvent)]);
   });
 
   it('is safe to run twice: a compensated payment is returned as it stands', async () => {
@@ -172,7 +172,7 @@ describe('CompensatePaymentHandler', () => {
       expect(payment.status).toBe(PaymentStatus.Declined);
       expect(payment.failureReason).toBe(FailureReason.ACCOUNTS_UNAVAILABLE);
       expect(payments.statuses).toEqual([PaymentStatus.Declined]);
-      expect(events.publishAll).toHaveBeenCalledWith([expect.any(PaymentDeclinedEvent)]);
+      expect(events.enqueue).toHaveBeenCalledWith([expect.any(PaymentDeclinedEvent)]);
     });
 
     it('asks accounts under the payment own debit key', async () => {
