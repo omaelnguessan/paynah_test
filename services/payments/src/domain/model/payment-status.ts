@@ -7,13 +7,7 @@ export enum PaymentStatus {
   CompensationPending = 'CompensationPending',
 }
 
-/**
- * The state machine, written out in full.
- *
- * Everything not listed here is impossible, and saying so in one table — rather
- * than scattering `if (status === …)` across handlers — is what makes the
- * machine testable with neither a database nor a network.
- */
+/** Allowed payment state transitions. Unlisted transitions are rejected. */
 export const ALLOWED_TRANSITIONS: Readonly<Record<PaymentStatus, readonly PaymentStatus[]>> = {
   // Nothing has been attempted yet: the payment can start, or be refused outright.
   [PaymentStatus.Pending]: [PaymentStatus.Processing, PaymentStatus.Declined],

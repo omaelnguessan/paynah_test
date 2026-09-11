@@ -28,12 +28,8 @@ import { ACCOUNTS_PORT, AccountsPort } from '../src/domain/ports/accounts.port';
 import { DomainErrorFilter } from '../src/presentation/filters/domain-error.filter';
 
 /**
- * Drives the real saga against the real `accounts` service and the real
- * database. Everything interesting here — idempotency, compensation, the
- * outbox — is about what survives a boundary, so stubbing the boundary out
- * would be testing the stub.
- *
- * Needs the stack up: `make up && make migrate && make seed`.
+ * End-to-end saga tests against the services and databases.
+ * Requires `make up && make migrate && make seed`.
  */
 describe('payments (e2e)', () => {
   let app: INestApplication;
@@ -455,12 +451,7 @@ describe('payments (e2e)', () => {
   });
 
   describe('a debit whose outcome is unknown', () => {
-    /**
-     * The two states an interrupted debit can leave behind look identical from
-     * the payment's side — `Processing`, no debit reference — and they need
-     * opposite repairs. These two tests are the reason the reconciler asks
-     * `accounts` instead of assuming.
-     */
+    /** Covers lost debit responses with and without an applied movement. */
     let unreliable: INestApplication;
     let unreliableHttp: request.Agent;
     let commands: CommandBus;

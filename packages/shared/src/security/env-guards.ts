@@ -1,9 +1,4 @@
-/**
- * Values that are fine on a laptop and unacceptable in production. The list is
- * deliberately about *placeholders*, not about strength: a short secret is
- * caught by the length rule, but a long one copied from `.env.example` would
- * sail through it — and that is the mistake that actually happens.
- */
+/** Known development-secret placeholders, rejected in production. */
 const PLACEHOLDERS = ['change-me', 'changeme', 'dev-internal', 'test-internal', 'example', 'paynad_pwd'];
 
 export interface ProductionSecrets {

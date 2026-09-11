@@ -5,14 +5,7 @@ import {
   bigintTransformer,
 } from '@paynad/shared';
 
-/**
- * Append-only record of every balance movement. Rows are never updated and
- * never deleted: the wallet balance is a cache of this table's sum.
- *
- * The unique `(wallet_id, transaction_id)` is what makes credit and debit
- * idempotent — a replay hits the constraint and returns the original row
- * instead of moving money twice.
- */
+/** Append-only balance movements. The unique (wallet_id, transaction_id) key prevents duplicate movements. */
 @Entity('ledger_entries')
 @Unique('uq_ledger_entries_wallet_transaction', ['wallet_id', 'transaction_id'])
 @Index('ix_ledger_entries_wallet_created', ['wallet_id', 'created_at'])
@@ -28,7 +21,7 @@ export class LedgerEntry {
   @Column({ type: 'uuid' })
   wallet_id: string;
 
-  /** Caller-supplied idempotency key. */
+  /** Caller-supplied idempotency key. Allows _ and : for derived saga movement keys. */
   @Column({ type: 'varchar', length: 64 })
   transaction_id: string;
 

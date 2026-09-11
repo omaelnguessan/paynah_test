@@ -13,8 +13,7 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
   app.useLogger(app.get(Logger));
 
-  // Documentation is a development affordance: it maps the whole attack surface
-  // in one page, so it is opt-in outside development.
+  // Swagger is opt-in in production.
   const docsEnabled =
     process.env.SWAGGER_ENABLED === 'true' || process.env.NODE_ENV !== 'production';
   applyHttpHardening(app, {

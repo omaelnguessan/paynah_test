@@ -8,13 +8,7 @@ import { Inject } from '@nestjs/common';
 import { OUTBOX_REPOSITORY } from '../../domain/ports/outbox.repository';
 import { CorrelationContext } from '../http/correlation.context';
 
-/**
- * Implements the ledger port by writing to the outbox rather than publishing.
- *
- * The call sites are inside a transaction, so a message written here commits
- * with the state change that justified it — the ledger can never hear about a
- * payment the database rolled back, and a broker outage never fails a payment.
- */
+/** Writes ledger messages to the outbox within the payment transaction. */
 @Injectable()
 export class TransactionsOutboxAdapter implements TransactionsPort {
   constructor(

@@ -12,14 +12,7 @@ import { Transaction } from '../transactions/entities/transaction.entity';
 
 const logger = new Logger('seed:transactions');
 
-/**
- * A short history for one demo wallet: a debit, a matching refund and a credit.
- * The refund is the point — a ledger is never amended, so a correction is a new
- * row that offsets the original.
- *
- * Keyed on `transaction_id`, which is the idempotency key, so re-running the
- * seed appends nothing.
- */
+/** Demo debit, refund and credit, deduplicated by transaction_id. */
 const PAYMENT_REFERENCE = 'pay_01hq3m8x0000zt7k9d2v4bqf1c';
 const USER_REFERENCE = 'usr_01hq3m8x0000zt7k9d2v4bqf1c';
 const WALLET_REFERENCE = 'wlt_01hq3m8x0000zt7k9d2v4bqf1c';

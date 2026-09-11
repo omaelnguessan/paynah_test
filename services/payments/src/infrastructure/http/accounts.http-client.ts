@@ -33,13 +33,7 @@ const DOMAIN_ERRORS: Readonly<Record<string, (wallet: string) => DomainError>> =
   CURRENCY_MISMATCH: (wallet) => new CurrencyMismatchError(wallet),
 };
 
-/**
- * The one place in the service that knows `accounts` speaks HTTP.
- *
- * It owns the timeout, the retries and the circuit breaker, and it translates
- * every answer into the domain's vocabulary — so nothing above ever sees an
- * `AxiosError`, a status code or an external field name.
- */
+/** Accounts HTTP adapter with timeouts, retries, circuit breaking and domain error mapping. */
 @Injectable()
 export class AccountsHttpClient implements AccountsPort {
   private readonly logger = new Logger(AccountsHttpClient.name);
@@ -88,10 +82,8 @@ export class AccountsHttpClient implements AccountsPort {
   }
 
   /**
-   * The read that lets the saga stop guessing. A 404 is an answer — the key
-   * moved nothing — so it comes back as `null` rather than as a failure. Only
-   * a genuine inability to reach `accounts` is an error here, because "I do not
-   * know" and "it did not happen" must never collapse into the same value.
+   * Returns null on 404 and throws on upstream failures.
+   * A missing movement does not rule out an in-flight request.
    */
   async findMovement(wallet: Reference, idempotencyKey: string): Promise<MovementResult | null> {
     const url = `${this.baseUrl}/accounts/${wallet.value}/movements/${encodeURIComponent(idempotencyKey)}`;

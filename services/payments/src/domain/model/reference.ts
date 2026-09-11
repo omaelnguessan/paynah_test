@@ -1,11 +1,4 @@
-/**
- * A business reference: a family prefix and a time-ordered body.
- *
- * The domain owns this type so that a wallet reference and a payment reference
- * cannot be swapped by accident, and so no layer below has to agree on a string
- * format. Generation lives here too — a reference is a domain concept, not a
- * persistence detail.
- */
+/** Typed reference with a family prefix and time-ordered identifier. */
 export type ReferencePrefixName = 'usr' | 'wlt' | 'pay' | 'trx';
 
 /** Crockford base32, lowercased, minus the ambiguous i, l, o and u. */

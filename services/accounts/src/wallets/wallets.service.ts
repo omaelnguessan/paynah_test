@@ -117,13 +117,8 @@ export class WalletsService {
   }
 
   /**
-   * One movement, applied exactly once.
-   *
-   * The whole thing runs in a single transaction: the balance moves through a
-   * conditional UPDATE (so the guard and the write share one row lock) and the
-   * ledger row is inserted in the same unit of work. If the unique
-   * `(wallet_id, transaction_id)` fires, the transaction rolls back and the
-   * movement recorded by the winning caller is returned instead.
+   * The balance update and ledger insert share a transaction.
+   * A duplicate (wallet_id, transaction_id) rolls back the update and returns the existing movement.
    */
   private async applyMovement(
     reference: string,

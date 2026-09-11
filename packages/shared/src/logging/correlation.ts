@@ -5,11 +5,8 @@ export interface HeadersCarrier {
 }
 
 /**
- * A correlation id is echoed back in a response header, forwarded on every
- * outbound call and written into every log line, so it is attacker-controlled
- * data that travels far. It is therefore constrained rather than trusted:
- * printable, hyphen-or-alphanumeric, and short enough that no header grows
- * unbounded. Anything else is not repaired — a fresh id is minted instead.
+ * Validates the caller-controlled correlation ID before forwarding or logging it.
+ * Invalid or oversized values are replaced with a generated ID.
  */
 const SAFE_CORRELATION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 

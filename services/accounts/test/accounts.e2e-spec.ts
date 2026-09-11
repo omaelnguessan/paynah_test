@@ -14,13 +14,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 
-/**
- * Drives the real service against the real database — the interesting
- * behaviour here (idempotency, the conditional balance update) lives in
- * Postgres, so stubbing it out would test nothing.
- *
- * Needs the stack up: `make up && make migrate`.
- */
+/** Integration tests against PostgreSQL. Requires `make up && make migrate`. */
 describe('accounts (e2e)', () => {
   let app: INestApplication;
   let http: request.Agent;

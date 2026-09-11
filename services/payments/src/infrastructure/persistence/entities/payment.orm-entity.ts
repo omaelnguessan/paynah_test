@@ -23,7 +23,7 @@ export class PaymentOrmEntity {
   @Column({ type: 'varchar', length: 32 })
   reference: string;
 
-  /** Caller-supplied idempotency key. */
+  /** Caller-supplied idempotency key. Allows _ and : for derived saga movement keys. */
   @Index('uq_payments_transaction_id', { unique: true })
   @Column({ type: 'varchar', length: 64 })
   transaction_id: string;

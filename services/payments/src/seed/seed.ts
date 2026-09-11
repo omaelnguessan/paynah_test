@@ -16,13 +16,7 @@ const DEBIT = Reference.of('trx', 'trx_01hq3m8x0000zt7k9d2v4bqf1c');
 const CREDIT = Reference.of('trx', 'trx_01hq3m8x0000zt7k9d2v4bqf9z');
 const REFUND = Reference.of('trx', 'trx_01hq3m8x0000zt7k9d2v4bqfaa');
 
-/**
- * One payment per terminal state, built by driving the aggregate through legal
- * transitions rather than by inserting rows — a fixture that the state machine
- * would reject is a fixture that lies.
- *
- * Keyed on `transaction_id`, so re-running the seed inserts nothing.
- */
+/** Seeds each terminal state through the aggregate. Deduplicated by transaction_id. */
 const FIXTURES: Array<{ transactionId: string; build: () => Payment }> = [
   {
     transactionId: 'seed-payment-approved-01',

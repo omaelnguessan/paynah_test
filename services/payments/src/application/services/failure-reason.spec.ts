@@ -24,7 +24,7 @@ describe('failureReasonOf', () => {
   });
 
   it('records anything it cannot name precisely as an upstream failure', () => {
-    // Guessing would put a wrong reason in front of a caller; this is honest.
+
     expect(
       failureReasonOf(new InvalidTransitionError(PaymentStatus.Approved, PaymentStatus.Declined)),
     ).toBe(FailureReason.ACCOUNTS_UNAVAILABLE);

@@ -18,27 +18,18 @@ export interface HardeningOptions {
   /** Comma-separated list of allowed origins. Empty means: no browser origin. */
   corsOrigins?: string | null;
   /**
-   * How many reverse proxies sit in front, or an address range to believe.
-   * Left unset, `X-Forwarded-For` is ignored entirely — which is the safe
-   * default, because a header anyone can send must not decide who gets rate
-   * limited. Set it only when a proxy you control really is in front, or every
-   * client will share one bucket (unset) or forge its own (set too broadly).
+   * Trusted reverse-proxy count or address range.
+   * Unset by default; overly broad trust permits spoofing X-Forwarded-For.
    */
   trustProxy?: string | null;
 }
 
-/**
- * The HTTP hardening every service applies before it listens.
- *
- * None of it replaces the checks in the domain; it removes the classes of
- * problem that never reach a handler — oversized bodies, a browser calling the
- * API from a page it should not, a response that tells the world what runs here.
- */
+/** Shared HTTP headers, body limits and CORS configuration. */
 export function applyHttpHardening(app: INestApplication, options: HardeningOptions): void {
   const limit = options.bodyLimit ?? '64kb';
   const express = app as unknown as ExpressLike;
 
-  // Never advertise what runs here; helmet removes the header, this is belt.
+
   express.set('x-powered-by', false);
   if (options.trustProxy) {
     const hops = Number(options.trustProxy);

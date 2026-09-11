@@ -76,7 +76,7 @@ function MovementFailures(): MethodDecorator {
 export class WalletsController {
   constructor(private readonly wallets: WalletsService) {}
 
-  // Opening wallets in bulk costs us rows and costs the caller nothing.
+
   @StrictThrottle()
   @Post()
   @ApiOperation({ summary: 'Create a wallet for a user' })

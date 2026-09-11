@@ -5,12 +5,7 @@ export enum TransactionStatus {
   DECLINED = 'Declined',
 }
 
-/**
- * Direction of a movement, upper case on the wire.
- *
- * A ledger is append-only, so a correction is never an amendment: it is a new
- * `REFUND` row that offsets the original.
- */
+/** Movement direction on the wire. Refunds append a correction to the ledger. */
 export enum TransactionType {
   DEBIT = 'DEBIT',
   CREDIT = 'CREDIT',

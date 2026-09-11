@@ -30,7 +30,7 @@ export class PaymentSaga {
       await this.commands.execute(new DebitSourceWalletCommand(reference.value));
     } catch (error) {
       if (error instanceof DomainError) {
-        // Already recorded as Declined by the debit step; nothing moved.
+        // The debit handler persisted Declined or left an uncertain result Processing.
         return;
       }
       throw error;

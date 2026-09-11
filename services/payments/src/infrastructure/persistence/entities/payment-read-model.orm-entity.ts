@@ -1,14 +1,6 @@
 import { ViewColumn, ViewEntity } from 'typeorm';
 
-/**
- * The read model: a SQL view, mapped to the shape the API returns.
- *
- * It is a view rather than a table maintained by a projector because there is
- * no second write path to keep in sync and no window where a caller could read
- * a payment the write model has already moved on from. What matters for CQRS is
- * that the read side has its own contract and never hydrates the aggregate —
- * and when a join arrives, it lands here without touching a single query.
- */
+/** Read projection over payments. The SQL view requires no asynchronous projector. */
 @ViewEntity({
   name: 'payment_read_model',
   expression: `

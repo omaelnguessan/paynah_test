@@ -1,16 +1,7 @@
 import { Currency } from '../model/money';
 import { FailureReason, PaymentStatus } from '../model/payment-status';
 
-/**
- * The read side. Queries never hydrate the `Payment` aggregate: they read a
- * projection whose fields are named the way the domain names things, not the
- * way the HTTP contract spells them.
- *
- * That distinction matters. An earlier version of this interface carried
- * `transaction_id` and `source_wallet_reference` — the wire format, in layer 0
- * — which quietly made the domain depend on the shape of a JSON response. The
- * translation belongs to the presentation mapper, and it now happens there.
- */
+/** Read projection using domain field names. Queries do not hydrate Payment aggregates. */
 export interface PaymentView {
   reference: string;
   transactionId: string;

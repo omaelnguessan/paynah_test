@@ -9,12 +9,8 @@ import { OUTBOX_BATCH_SIZE, OUTBOX_MAX_ATTEMPTS } from './outbox.constants';
 import { TRANSACTIONS_CLIENT } from './messaging.tokens';
 
 /**
- * Drains the outbox into RabbitMQ.
- *
- * Publication is at-least-once by construction: a message is marked published
- * only after the broker has taken it, so a crash in between simply means the
- * next pass sends it again. Consumers are idempotent on `transaction_id`, which
- * is what makes that safe.
+ * Publishes committed outbox messages with at-least-once delivery.
+ * A crash after broker acknowledgement can cause redelivery; consumers must deduplicate.
  */
 @Injectable()
 export class OutboxRelay implements OnApplicationShutdown {

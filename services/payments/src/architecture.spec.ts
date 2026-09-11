@@ -1,13 +1,7 @@
 import { readdirSync, readFileSync, statSync } from 'fs';
 import { join, relative, resolve } from 'path';
 
-/**
- * The dependency rule, checked rather than described.
- *
- * ESLint enforces the same thing while you type; this test is what fails the
- * build, so an architecture violation cannot reach a reviewer as a warning
- * somebody skipped. It reads the real import statements — nothing is mocked.
- */
+/** Checks layer imports and forbidden framework dependencies. */
 const SOURCE_ROOT = resolve(__dirname);
 
 type Layer = 'domain' | 'application' | 'infrastructure' | 'presentation';

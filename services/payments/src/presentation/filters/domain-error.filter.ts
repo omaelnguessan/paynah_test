@@ -13,13 +13,7 @@ interface Mapping {
   message: ResponseMessage;
 }
 
-/**
- * The only place that knows a domain failure has an HTTP shape.
- *
- * The domain raises `InsufficientBalanceError`; deciding that this is a 422
- * carrying `"4001"` is a presentation concern, and keeping the decision here is
- * what lets the domain stay ignorant of HTTP.
- */
+/** Maps domain errors to HTTP statuses and API response codes. */
 const MAPPINGS: Readonly<Record<string, Mapping>> = {
   INSUFFICIENT_BALANCE: {
     status: HttpStatus.UNPROCESSABLE_ENTITY,

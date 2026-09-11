@@ -4,14 +4,7 @@ import { PaymentView } from '../../domain/ports/payment-read.port';
 import { InitiatePaymentRequest } from '../dto/initiate-payment.request';
 import { PaymentResponse } from '../dto/payment.response';
 
-/**
- * The explicit boundary between the wire and the application.
- *
- * Request → command on the way in, read model → response on the way out. Three
- * separate shapes, two mappers, no shortcut: this is what keeps a
- * `class-validator` decorator out of the command and a `@Column()` out of the
- * aggregate.
- */
+/** Maps request DTOs to commands and read models to response DTOs. */
 export class PaymentMapper {
   static toCommand(request: InitiatePaymentRequest): InitiatePaymentCommand {
     return new InitiatePaymentCommand(

@@ -5,12 +5,8 @@ import { DataSource, EntityManager, QueryRunner } from 'typeorm';
 import { TransactionRunner } from '../../domain/ports/transaction-runner.port';
 
 /**
- * Implements the domain's `TransactionRunner`.
- *
- * The ambient `EntityManager` is carried in async storage rather than threaded
- * through every signature, so a repository joins the caller's transaction
- * without the application layer ever handling one — `TransactionRunner.run` is
- * all it knows about atomicity.
+ * Shares the transaction manager through AsyncLocalStorage.
+ * Saga steps reuse the lock-owning connection for separate local transactions.
  */
 @Injectable()
 export class TransactionContext implements TransactionRunner {

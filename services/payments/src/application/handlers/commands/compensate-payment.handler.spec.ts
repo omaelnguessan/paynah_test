@@ -146,12 +146,7 @@ describe('CompensatePaymentHandler', () => {
   });
 
   describe('a payment that never recorded its debit', () => {
-    /**
-     * The reconciler hands over payments stuck in `Processing`, and the state
-     * alone cannot say whether the money left: the process may have died before
-     * the debit, or after it and before writing the reference down. Refunding
-     * on a guess creates money half the time.
-     */
+    /** Tests debit recovery when Processing has no recorded movement reference. */
     const stuckInProcessing = (): Payment => {
       const payment = aPayment();
       payment.markProcessing();

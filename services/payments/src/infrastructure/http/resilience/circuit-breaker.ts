@@ -23,14 +23,7 @@ export class CircuitOpenError extends Error {
   }
 }
 
-/**
- * A small circuit breaker, deliberately hand-rolled: the behaviour is a dozen
- * lines and worth reading, and it keeps the dependency list honest.
- *
- * Once `accounts` has failed repeatedly, hammering it makes the outage worse and
- * makes every caller wait for a timeout that is already known to be coming.
- * Opening the circuit turns that wait into an immediate, explicit failure.
- */
+/** Opens after repeated upstream failures and probes recovery after the cooldown. */
 export class CircuitBreaker {
   private readonly logger = new Logger(CircuitBreaker.name);
   private state = CircuitState.Closed;

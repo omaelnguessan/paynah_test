@@ -11,13 +11,7 @@ export interface PlatformLoggerOptions {
   pretty?: boolean;
 }
 
-/**
- * One logger configuration for the whole platform.
- *
- * Every line carries `service_name` and `correlation_id`, and the id is taken
- * from `x-correlation-id` when the caller supplied one — which is what makes a
- * single `grep` follow a payment through all three services.
- */
+/** Shared structured logger with service_name and correlation_id. */
 export function platformLoggerParams(options: PlatformLoggerOptions): Params {
   const level = options.level ?? process.env.LOG_LEVEL ?? 'info';
 

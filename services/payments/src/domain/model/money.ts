@@ -3,13 +3,7 @@ export enum Currency {
   XOF = 'XOF',
 }
 
-/**
- * An amount and its currency, inseparable.
- *
- * Amounts are integers in the minor unit and never floats: the value object
- * refuses anything else at construction, so no other layer has to re-check it.
- * Two amounts of different currencies cannot be compared or combined.
- */
+/** Amount and currency. Amounts must be integers of at least 5, in multiples of 5. */
 export class Money {
   private constructor(
     private readonly _amount: number,

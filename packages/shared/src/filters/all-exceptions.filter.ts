@@ -73,12 +73,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     };
   }
 
-  /**
-   * Framework-level failures (an unknown route, a wrong verb, a malformed body)
-   * never carry a domain code. They collapse onto the two generic buckets so a
-   * client only ever reads codes from the published catalogue — the HTTP status
-   * still tells it apart.
-   */
+  /** Maps framework failures to generic API codes while preserving the HTTP status. */
   private codeForHttpStatus(status: number): string {
     return status >= HttpStatus.INTERNAL_SERVER_ERROR
       ? ResponseCode.INTERNAL_ERROR

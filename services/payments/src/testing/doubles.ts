@@ -10,13 +10,7 @@ import {
 import { PaymentRepository } from '../domain/ports/payment.repository';
 import { TransactionRunner } from '../domain/ports/transaction-runner.port';
 
-/**
- * Test doubles for the ports the application layer talks to.
- *
- * They live outside `domain/` and `application/` on purpose: the layers under
- * test import nothing from here, so the architecture rules stay true and the
- * coverage figures stay honest.
- */
+/** Application port doubles, kept outside the domain and application coverage targets. */
 
 export const SOURCE = Reference.of('wlt', 'wlt_01hq3m8x0000zt7k9d2v4bqf1c');
 export const DESTINATION = Reference.of('wlt', 'wlt_01hq3m8x0000zt7k9d2v4bqf9z');

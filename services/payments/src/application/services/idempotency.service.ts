@@ -16,13 +16,7 @@ export interface IdempotentOutcome<T> {
   replayed: boolean;
 }
 
-/**
- * Insert first, ask questions second.
- *
- * A `SELECT` followed by an `INSERT` would let two concurrent requests both
- * decide the key is free. Claiming the key with an insert makes the unique
- * constraint the arbiter, and the loser then reads what the winner recorded.
- */
+/** Reserves the idempotency key, creates the payment and stores its response atomically. */
 @Injectable()
 export class IdempotencyService {
   private readonly logger = new Logger(IdempotencyService.name);
@@ -58,8 +52,7 @@ export class IdempotencyService {
   private async resolveExisting<T>(key: string, requestHash: string): Promise<T> {
     const existing = await this.keys.find(key);
     if (!existing) {
-      // The claim was released between the failed insert and this read: the
-      // first attempt failed, so the caller is free to try again.
+      // No durable claim was found; the caller may retry.
       throw new RequestInProgressError(key);
     }
     if (existing.requestHash !== requestHash) {

@@ -32,12 +32,8 @@ export class WalletRepository {
   }
 
   /**
-   * Moves the balance in a single conditional statement. The guard clauses live
-   * in the WHERE, so the decision and the write happen atomically inside one
-   * row lock — the balance is never read into memory and written back.
-   *
-   * `applied: false` means some predicate failed; the caller re-reads the row to
-   * find out which, and that read only ever produces a refusal, never a write.
+   * Updates the balance atomically under currency, status and balance constraints.
+   * Returns applied=false when a constraint rejects the movement.
    */
   async move(
     walletId: string,

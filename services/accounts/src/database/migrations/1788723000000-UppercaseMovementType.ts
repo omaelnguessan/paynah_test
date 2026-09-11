@@ -1,13 +1,8 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
- * Movement types become upper case platform-wide (`CREDIT`, `DEBIT`, `REFUND`),
- * so `accounts` and `transactions` speak one vocabulary.
- *
- * The ledger is append-only by trigger, which is exactly what should stop a
- * casual amendment — so the trigger is dropped for the length of this migration
- * and recreated immediately, making the one legitimate rewrite explicit and
- * auditable in the migration history.
+ * Normalizes movement types to CREDIT, DEBIT and REFUND.
+ * Temporarily removes the append-only trigger, then reinstates it after the update.
  */
 export class UppercaseMovementType1788723000000 implements MigrationInterface {
   name = 'UppercaseMovementType1788723000000';

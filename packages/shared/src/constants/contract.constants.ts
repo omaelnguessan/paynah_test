@@ -27,14 +27,7 @@ export function referencePattern(prefix: string): RegExp {
   return new RegExp(`^${prefix}_${REFERENCE_BODY_PATTERN}$`);
 }
 
-/**
- * Caller-supplied idempotency key.
- *
- * `_` and `:` are part of the charset because the payments saga derives its keys
- * from the payment reference — `pay_01hq…` for the debit leg, `pay_01hq…:credit`
- * for the credit, `:refund` for the compensation — so one glance at a movement
- * in `accounts` says which payment and which leg it belongs to.
- */
+/** Caller-supplied idempotency key. Allows _ and : for derived saga movement keys. */
 export const TRANSACTION_ID_MIN_LENGTH = 8;
 export const TRANSACTION_ID_MAX_LENGTH = 64;
 export const TRANSACTION_ID_REGEX = /^[A-Za-z0-9:_-]{8,64}$/;

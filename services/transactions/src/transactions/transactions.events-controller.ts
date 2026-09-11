@@ -12,14 +12,9 @@ interface Channel {
 }
 
 /**
- * The primary way movements reach the ledger; the HTTP POST is the fallback.
- *
- * Acknowledgement is manual and deliberate:
- * - appended, or already known → ack;
- * - malformed payload → ack, because redelivering it forever would only build a
- *   poison loop; the payload is logged so it can be replayed by hand;
- * - anything else (the database is down, say) → nack with requeue, since the
- *   next delivery has a real chance of succeeding.
+ * Consumes ledger events with manual acknowledgement:
+ * ack successful, duplicate or malformed messages; requeue transient failures.
+ * Malformed payloads are logged for investigation.
  */
 @Controller()
 export class TransactionsEventsController {

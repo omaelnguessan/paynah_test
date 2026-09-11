@@ -17,11 +17,9 @@ import { TransactionsModule } from './transactions/transactions.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, cache: true, validate: validateEnv }),
-    // Rate limiting is a module, not a proxy rule: the API defends itself even
-    // when it is reached directly, and the budgets travel with the code.
+
     ThrottlerModule.forRoot(platformThrottlerOptions(throttlerSettingsFrom(process.env))),
-    // One logger config for the platform: every line carries service_name and
-    // correlation_id, so a single grep follows a payment across all three services.
+
     PlatformLoggerModule({
       serviceName: 'transactions',
       pretty: process.env.NODE_ENV === 'development',

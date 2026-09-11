@@ -55,13 +55,7 @@ const COMMAND_HANDLERS = [
 
 const QUERY_HANDLERS = [GetPaymentByReferenceHandler, ListPaymentsHandler];
 
-/**
- * The only place where the layers meet.
- *
- * Every port is bound to an implementation here, by token. Handlers ask for
- * `ACCOUNTS_PORT` and receive an HTTP client they know nothing about — swapping
- * it for a stub is a one-line change in this file and nowhere else.
- */
+/** Binds application ports to infrastructure adapters. */
 @Module({
   imports: [
     CqrsModule,

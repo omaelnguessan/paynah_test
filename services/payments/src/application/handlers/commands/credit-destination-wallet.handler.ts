@@ -23,12 +23,8 @@ import {
 import { CreditDestinationWalletCommand } from '../../commands/credit-destination-wallet.command';
 
 /**
- * Saga steps 5 to 7: credit the destination, approve the payment, and hand both
- * movements to the ledger — the approval and the outbox rows commit together,
- * so the ledger can never learn about a payment the database does not have.
- *
- * An explicit refusal permits compensation. An uncertain outcome remains
- * Processing until reconciliation establishes whether the credit landed.
+ * Credits the destination, then commits approval and outbox messages together.
+ * Confirmed refusals permit compensation; unknown outcomes remain Processing.
  */
 @CommandHandler(CreditDestinationWalletCommand)
 export class CreditDestinationWalletHandler implements ICommandHandler<CreditDestinationWalletCommand> {

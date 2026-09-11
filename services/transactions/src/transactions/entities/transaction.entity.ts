@@ -7,12 +7,8 @@ import {
 } from '@paynad/shared';
 
 /**
- * The platform ledger: append-only, no UPDATE and no DELETE. A correction is a
- * new `REFUND` row that offsets the original, never an amendment of it.
- *
- * The two composite indexes match the only two access patterns the history
- * endpoint allows, which is why an unfiltered listing is refused rather than
- * served by a full scan.
+ * Append-only ledger. Corrections use REFUND entries.
+ * Indexes support history queries by user or wallet.
  */
 @Entity('transactions')
 @Index('ix_transactions_wallet_occurred', ['wallet_reference', 'occurred_at'])

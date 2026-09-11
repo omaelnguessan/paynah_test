@@ -37,14 +37,7 @@ export interface PaymentSnapshot {
   completedAt: Date | null;
 }
 
-/**
- * The payment aggregate.
- *
- * Every state change goes through a method that first asks the transition table
- * whether it is legal, so an illegal sequence fails here rather than three
- * layers away. No framework, no ORM, no HTTP: this file imports nothing outside
- * the domain, which is what makes the whole state machine unit-testable.
- */
+/** Payment aggregate. State changes follow ALLOWED_TRANSITIONS. */
 export class Payment {
   private _events: DomainEvent[] = [];
 

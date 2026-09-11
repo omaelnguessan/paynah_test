@@ -1,10 +1,4 @@
-/**
- * Which failures are worth trying again.
- *
- * The distinction is the whole point: a timeout or a 503 says nothing about the
- * money and can be retried, while "insufficient balance" is a decision — retrying
- * it just wastes time and risks a double movement if the first call did land.
- */
+/** Retries transient transport failures. Business refusals are not retried. */
 const RETRYABLE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'EPIPE']);
 
 export interface FailureShape {

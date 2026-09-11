@@ -2,12 +2,7 @@ import { Payment, PaymentSnapshot } from '../../../domain/model/payment';
 import { FailureReason, PaymentStatus } from '../../../domain/model/payment-status';
 import { PaymentOrmEntity } from '../entities/payment.orm-entity';
 
-/**
- * The only place where the aggregate and its table meet.
- *
- * Keeping it explicit is what lets `Payment` stay free of decorators: the
- * mapper absorbs every naming and nullability difference between the two.
- */
+/** Maps between Payment and its persistence representation. */
 export class PaymentOrmMapper {
   static toDomain(row: PaymentOrmEntity): Payment {
     const snapshot: PaymentSnapshot = {

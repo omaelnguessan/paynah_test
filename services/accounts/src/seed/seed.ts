@@ -14,14 +14,7 @@ import dataSource from '../config/data-source';
 
 const logger = new Logger('seed:accounts');
 
-/**
- * Three users and five wallets, with deliberately varied balances: one rich,
- * one empty, one modest, one merchant account and one frozen — between them
- * they cover every path the API can take without a single hand-written row.
- *
- * Fixtures are keyed on natural keys (the customer email, the wallet label) so
- * re-running the seed never duplicates a row and never re-credits a wallet.
- */
+/** Demo users and wallets. Natural keys make seeding repeatable without crediting wallets again. */
 const FIXTURES = [
   {
     email: 'awa.traore@example.com',
@@ -44,7 +37,7 @@ const FIXTURES = [
     country: 'CI',
     wallets: [
       { label: 'Compte principal', balance: 25_000, status: WalletStatus.ACTIVE },
-      // The destination of the demo payment: funded, but not richly.
+
       { label: 'Compte marchand', balance: 75_000, status: WalletStatus.ACTIVE },
     ],
   },

@@ -15,13 +15,7 @@ export interface MovementDetails {
   paymentReference: Reference;
 }
 
-/**
- * The domain's view of the accounts service.
- *
- * The signature is expressed entirely in domain types. An implementation that
- * speaks HTTP translates 4xx and 5xx into domain errors before they get here,
- * so no layer above ever sees a status code.
- */
+/** Accounts operations expressed in domain types; adapters translate transport errors. */
 export interface AccountsPort {
   debit(
     wallet: Reference,
@@ -36,12 +30,9 @@ export interface AccountsPort {
     details: MovementDetails,
   ): Promise<MovementResult>;
   /**
-   * Has this key already moved money on this wallet?
-   *
-   * The saga needs it after losing an answer: "the debit never happened" and
-   * "the debit happened and the response was lost" demand opposite repairs, and
-   * only the service that owns the balance can tell them apart. `null` means
-   * the key produced nothing; an error means we still do not know.
+   * Looks up a recorded movement by idempotency key.
+   * Returns null if none is currently visible; an in-flight request may still complete.
+   * Throws when the outcome cannot be read.
    */
   findMovement(wallet: Reference, idempotencyKey: string): Promise<MovementResult | null>;
 }

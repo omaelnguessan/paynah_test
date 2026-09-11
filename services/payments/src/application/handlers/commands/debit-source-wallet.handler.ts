@@ -18,15 +18,8 @@ import { DebitSourceWalletCommand } from '../../commands/debit-source-wallet.com
 import { failureReasonOf } from '../../services/failure-reason';
 
 /**
- * Saga steps 2 to 4: move to Processing, take the money, record the movement.
- *
- * A refusal from `accounts` is a business outcome, not an exception to swallow:
- * the payment is declined and persisted, and the error is rethrown so the saga
- * stops rather than carrying on to the credit.
- *
- * An *unreachable* `accounts` is a different animal and is deliberately not
- * declined. The debit may have been applied and only its answer lost, so the
- * payment is left Processing for the reconciler to settle against the truth.
+ * Persists Processing before attempting the debit.
+ * Confirmed refusals decline the payment; unknown outcomes remain Processing for reconciliation.
  */
 @CommandHandler(DebitSourceWalletCommand)
 export class DebitSourceWalletHandler implements ICommandHandler<DebitSourceWalletCommand> {

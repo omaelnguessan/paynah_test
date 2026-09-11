@@ -34,12 +34,7 @@ export function platformThrottlerOptions(settings: ThrottlerSettings): Throttler
   };
 }
 
-/**
- * The budget for a route that creates a resource or moves money. A decorator
- * rather than a second named throttler, because a named throttler applies to
- * every route unless each one opts out — the wrong default for a rule that
- * concerns four endpoints.
- */
+/** Applies the stricter budget only to decorated routes. */
 export function StrictThrottle(): MethodDecorator {
   // Resolved per request rather than at import time, so the budget follows the
   // environment the process actually booted with.
@@ -51,12 +46,7 @@ export function StrictThrottle(): MethodDecorator {
   });
 }
 
-/**
- * The budget for a route only another service calls. It is deliberately wide:
- * the saga makes two or three movements per payment, so a public-facing ceiling
- * here would throttle the platform's own traffic long before it stopped anyone.
- * The counter is still per credential, so a leaked key cannot become a firehose.
- */
+/** Higher request budget for internal service calls, keyed by credential. */
 export function InternalThrottle(): MethodDecorator {
   return Throttle({
     default: {
@@ -77,25 +67,10 @@ interface ResponseLike {
   header(name: string, value: string): void;
 }
 
-/**
- * The platform's rate limiter.
- *
- * Two things are changed from the stock guard. A rejection leaves through the
- * envelope like every other failure, so a client parses one shape whatever goes
- * wrong. And the counter is keyed on the internal API key when the caller
- * presents one — a single upstream service must not share a bucket with the
- * public internet just because it happens to sit behind the same address.
- */
+/** Returns rate-limit errors in the API envelope and groups internal calls by credential. */
 @Injectable()
 export class EnvelopeThrottlerGuard extends ThrottlerGuard {
-  /**
-   * A global guard sees every execution context, and `transactions` consumes
-   * RabbitMQ messages through the same application. A broker delivery has no
-   * client address, no headers and no caller to hold to a budget — and asking
-   * it for one used to take the consumer down with a TypeError. Anything that
-   * is not HTTP passes straight through; the queue is rate limited by prefetch,
-   * which is the broker's job and not this guard's.
-   */
+  /** Skips non-HTTP contexts. RabbitMQ delivery is limited separately by prefetch. */
   async canActivate(context: ExecutionContext): Promise<boolean> {
     if (context.getType<string>() !== 'http') {
       return true;

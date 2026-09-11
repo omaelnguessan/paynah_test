@@ -8,8 +8,7 @@ import { OutboxOrmEntity } from '../../infrastructure/persistence/entities/outbo
 import { HealthDto } from './health.dto';
 
 @ApiTags('health')
-// Probes must never be rate limited: an orchestrator polling health is not
-// a caller to defend against, and a 429 here would look like an outage.
+// Health probes are exempt from rate limiting.
 @SkipThrottle()
 @Controller('health')
 export class HealthController {

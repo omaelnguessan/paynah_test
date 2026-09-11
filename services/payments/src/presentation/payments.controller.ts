@@ -34,7 +34,7 @@ export class PaymentsController {
     private readonly queries: QueryBus,
   ) {}
 
-  // The one route that moves money: the tightest budget of the platform.
+
   @StrictThrottle()
   @Post()
   @HttpCode(HttpStatus.CREATED)
