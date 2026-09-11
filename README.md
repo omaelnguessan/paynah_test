@@ -244,8 +244,19 @@ de la stack démarrée et migrée ; `make test:e2e-isolated` amène la sienne.
 
 `services/payments` impose un plancher de **80 % d'instructions, de branches, de
 fonctions et de lignes sur `domain/` et `application/`** via `coverageThreshold`.
-On est aujourd'hui autour de 99 % d'instructions sur les deux, mais le seuil
-reste à 80 : c'est un garde-fou, pas un objectif à afficher.
+
+Dernière validation des corrections (11 septembre 2026) : **191 tests de
+`payments` passent**, ainsi que le lint, la vérification TypeScript et la
+compilation. La couverture a été validée avec le moteur V8 :
+
+```sh
+pnpm --filter @paynad/payments exec jest --coverage --coverageProvider=v8 --runInBand
+```
+
+Les suites de bout en bout ont été enrichies, mais leur dernière exécution a été
+bloquée avant leur lancement : le proxy empêchait le téléchargement d’une image
+Docker. Les nouvelles migrations et les scénarios distribués restent donc à
+valider sur la stack réelle. Le chiffre de 191 concerne uniquement `payments`.
 
 Les barils de réexport et les doublures de test sont sortis de la mesure, sinon
 le chiffre monte sans qu'une seule assertion ait été ajoutée.
@@ -258,9 +269,7 @@ le circuit s'ouvre après N échecs consécutifs puis échoue immédiatement, et
 rafale de refus ne l'ouvre jamais, parce qu'un refus signifie qu'`accounts` est
 debout et répond.
 
-Cinq scénarios de bout en bout portent l'essentiel. Ce sont eux qui ont trouvé
-les vrais bugs du projet, les tests unitaires n'ayant jamais rien attrapé de
-sérieux :
+Les principaux scénarios de bout en bout définis dans la suite sont :
 
 1. **Un paiement aboutit** : les deux soldes bougent, le paiement est `Approved`,
    et exactement deux lignes atteignent le ledger, une par wallet.
@@ -268,13 +277,19 @@ sérieux :
    `INSUFFICIENT_BALANCE`, la source est intacte, et **aucune** ligne n'est
    écrite au ledger ; le même refus à la frontière d'`accounts` répond 422.
 3. **Deux fois le même `transaction_id`** : une seule référence, un seul débit au
-   ledger, et le rejeu renvoie la première réponse à l'octet près.
+   ledger, et le rejeu retrouve la même référence. La réponse HTTP relit l’état
+   courant, qui peut avoir évolué depuis le premier appel.
 4. **L'aval est indisponible** : `accounts.credit` est bouchonné en timeout
    après un vrai débit, avec ou sans crédit réellement appliqué. Aucun remboursement
    n’est émis : un crédit retrouvé donne `Approved`, sinon le paiement reste `Processing`.
 5. **Dix paiements se disputent de quoi en couvrir six** : exactement six
    `Approved`, quatre `Declined`, le wallet finit à zéro, six débits distincts au
    ledger, et pas un solde négatif en chemin.
+6. **Deux workers visent le même paiement** : une session PostgreSQL détient le
+   verrou ; l’autre reçoit un conflit, puis peut acquérir le verrou après libération.
+7. **Une transaction échoue après l’écriture de l’événement** : l’état et
+   l’outbox sont annulés ensemble. La suite vérifie aussi la relance d’un
+   message d’outbox épuisé et le compteur des reprises.
 
 Les assertions sur le ledger interrogent en boucle plutôt que d'attendre : les
 mouvements atteignent `transactions` par l'outbox et le broker, donc le chemin
@@ -296,6 +311,36 @@ make migration-revert SERVICE=accounts        # annule la dernière
 docker compose exec accounts sh -lc \
   'cd /app/services/accounts && pnpm typeorm migration:generate src/database/migrations/AddX'
 ```
+
+#### Mise à niveau d’une installation existante
+
+Les corrections de fiabilité ajoutent quatre migrations dans `payments` :
+
+| Migration | Effet |
+|---|---|
+| `RecoverIdempotency1789084800000` | Rattache les anciennes clés `IN_PROGRESS` à leur paiement, ou retire les réservations sans paiement |
+| `PaymentVersion1789084801000` | Ajoute la version utilisée pour refuser les sauvegardes périmées |
+| `ReconciliationSchedule1789084802000` | Ajoute le compteur de reprises, leur échéance, leur dernière erreur et un index |
+| `OutboxSchedule1789084803000` | Ajoute l’échéance des publications et un index |
+
+**Arrêter les anciennes instances de `payments` avant la migration de réparation
+et appliquer les quatre migrations avant le démarrage des nouvelles instances.**
+La réparation des clés est une opération de données irréversible ; son `down`
+ne recrée pas les réservations supprimées.
+
+Sur une stack existante dont PostgreSQL et les autres dépendances tournent déjà :
+
+```sh
+docker compose stop payments
+docker compose build payments
+docker compose run --rm --no-deps payments sh -lc \
+  'cd /app/services/payments && pnpm typeorm migration:run'
+docker compose up -d --no-deps payments
+```
+
+Le [dossier des migrations](services/payments/src/infrastructure/persistence/migrations)
+contient les opérations exactes. Pour une installation neuve, suivre le démarrage
+rapide et exécuter toutes les migrations.
 
 ## Contrat d'API
 
@@ -372,8 +417,9 @@ trient donc chronologiquement dans un index et restent lisibles au téléphone.
 | `5001` | `UPSTREAM_UNAVAILABLE` | 503 |
 
 Un refus métier est un 422, pas un 409 : la requête était bien formée et le
-domaine l'a refusée. Le 409 est réservé à un appelant qui se contredit, ce
-qu'est précisément un conflit d'idempotence. `VALIDATION_FAILED` sert aussi de
+domaine l'a refusée. Le 409 signale notamment une clé d’idempotence
+réutilisée avec un autre contenu, un paiement déjà en traitement ou une
+sauvegarde fondée sur une version périmée. `VALIDATION_FAILED` sert aussi de
 catégorie générique pour les fautes de l'appelant : une `x-api-key` rejetée, une
 route inconnue et un historique sans périmètre y atterrissent tous. Le statut
 HTTP les distingue, et aucun ne laisse fuir de détail.
@@ -546,7 +592,7 @@ Et pour savoir si une clé a déjà servi, sans rien déplacer :
 ```bash
 curl -s $ACCOUNTS/accounts/$SOURCE/movements/demo-debit-0001 \
   -H "x-api-key: $KEY" -H "x-api-secret: $SECRET"
-# 200 avec le mouvement, ou 404 TRANSACTION_NOT_FOUND si la clé n'a rien produit
+# 200 avec le mouvement, ou 404 TRANSACTION_NOT_FOUND si aucun mouvement n’est visible
 ```
 
 ### `payments` : lancer un paiement
@@ -668,7 +714,6 @@ Importez les deux, sélectionnez l'environnement **paynad — local**, puis lanc
 ```bash
 npx newman run postman/paynad.postman_collection.json \
   -e postman/paynad.postman_environment.json
-# 29 requêtes, 49 assertions, 0 échec
 ```
 
 Le scénario crée un utilisateur, ouvre un wallet approvisionné et un wallet vide,
@@ -834,20 +879,16 @@ décrit ce qui est là.
 ```
 src/
 ├── domain/          couche 0 — aucune dépendance sortante, framework compris
-├── application/     couche 1 — dépend uniquement du domaine
+├── application/     couche 1 — cas d’usage, domaine et orchestration NestJS
 ├── infrastructure/  couche 2 — implémente les ports du domaine
 └── presentation/    couche 3 — HTTP
 ```
 
-Les imports ne pointent que vers l'intérieur. C'est garanti deux fois : par
-`no-restricted-imports` dans `services/payments/.eslintrc.json`, et par
-`src/architecture.spec.ts`, qui analyse chaque instruction d'import réelle et
-fait échouer le build en cas de violation.
-
-Pourquoi les deux ? Parce qu'une règle de lint se désactive avec un commentaire,
-et que je me connais. Le test, lui, vérifie aussi son propre cas négatif : si on
-ajoute `@nestjs/common` à `domain/model/money.ts`, il doit passer au rouge. Un
-garde-fou qu'on n'a jamais vu échouer ne rassure pas beaucoup.
+Le domaine ne dépend ni du framework ni de la persistance. L’application peut
+utiliser NestJS pour l’injection et les bus, mais ne dépend pas des adaptateurs
+TypeORM ou HTTP. Les règles sont contrôlées par `no-restricted-imports` dans
+`services/payments/.eslintrc.json` et par `src/architecture.spec.ts`, exécuté
+avec la suite de tests.
 
 Cinq représentations, jamais confondues, avec un mapper explicite entre chaque
 paire :
@@ -868,8 +909,7 @@ couche 0 dépendait discrètement de la forme d'une réponse HTTP. Un test du
 mapper vérifie maintenant qu'aucune graphie du domaine ne ressort sur le fil.
 
 `Payment` n'importe rien hors de `domain/`, ce qui permet de tester la machine à
-états entière sans base, sans HTTP et sans Nest : 22 tests, en quelques
-millisecondes.
+états sans base, sans HTTP et sans Nest.
 
 ### La machine à états
 
@@ -891,17 +931,18 @@ stateDiagram-v2
     Compensated --> [*]
 ```
 
-`Approved`, `Declined` et `Compensated` sont terminaux. `CompensationPending` ne
-l'est délibérément pas : de l'argent est au mauvais endroit, et seul le
-réconciliateur l'en sort.
+`Approved`, `Declined` et `Compensated` sont terminaux. `Pending`, `Processing`
+et `CompensationPending` peuvent être repris. Une décision de remboursement est
+persistée en `CompensationPending` avant l’appel de remboursement, exécuté par
+la saga ou réessayé par le réconciliateur.
 
 ### La saga
 
 Chaque étape est une commande avec sa propre transaction ; la saga ne décide que
 de la suite.
 
-1. le paiement est persisté `Pending` **avant le moindre appel sortant**, pour
-   qu'un crash laisse toujours quelque chose que le réconciliateur retrouvera ;
+1. la clé d’idempotence, le paiement `Pending` et la réponse contenant sa référence
+   commitent ensemble **avant le moindre appel sortant** ;
 2. `Processing`, puis `accounts.debit(source)`. Un refus décline le paiement et
    s'arrête là, rien n'ayant bougé ;
 3. `accounts.credit(destination)`. Un refus explicite est persisté en
@@ -909,12 +950,13 @@ de la suite.
    laisse `Processing` : la lecture du mouvement `:credit` permet de confirmer
    un succès sans rembourser la source ;
 4. l’approbation, les deux mouvements de ledger et la notification de cycle de vie
-   commitent **dans une seule transaction**, si bien que le ledger ne peut jamais entendre parler d'un
-   paiement que la base a annulé.
+   sont enregistrés **dans une seule transaction**. Si elle échoue, aucun de ces
+   messages n’est publié.
 
-Chaque patte porte sa propre clé d'idempotence dérivée de la référence du
-paiement : `pay_01hq…`, `…:credit`, `…:refund`. C'est ce qui rend chaque réessai,
-et le réconciliateur lui-même, rejouable sans risque.
+Chaque mouvement porte sa propre clé d’idempotence dérivée de la référence du
+paiement : `pay_01hq…`, `…:credit`, `…:refund`. Ces clés empêchent de répéter un
+même mouvement ; elles ne rendent pas un remboursement sûr si le crédit
+initial a peut-être réussi.
 
 #### Le flux nominal
 
@@ -929,9 +971,12 @@ sequenceDiagram
     participant T as transactions
 
     C->>P: POST /payments (transaction_id, montant, wallets)
-    P->>DB: INSERT clé d'idempotence, la contrainte unique arbitre
+    Note over P,DB: une transaction de création
+    P->>DB: INSERT clé ON CONFLICT DO NOTHING
     P->>DB: INSERT paiement (Pending)
-    Note over P,DB: durable avant le moindre appel sortant
+    P->>DB: clé COMPLETED avec la référence du paiement
+    P->>DB: COMMIT création
+    P->>DB: acquérir le verrou de session du paiement
     P->>DB: UPDATE paiement (Processing)
 
     P->>A: POST /accounts/{source}/debit, clé pay_01hq…
@@ -944,19 +989,20 @@ sequenceDiagram
 
     Note over P,DB: une seule transaction
     P->>DB: UPDATE paiement (Approved)
-    P->>DB: INSERT outbox × 2 (DEBIT, CREDIT)
-
-    P->>DB: clé d'idempotence → COMPLETED
+    P->>DB: INSERT outbox (DEBIT, CREDIT, payment.approved)
+    P->>DB: COMMIT approbation et outbox
+    P->>DB: libérer le verrou du paiement
     P-->>C: 201 { status: "Approved", reference: pay_… }
 
     Note over P,MQ: après le commit, jamais pendant
-    P->>MQ: OutboxRelay vide la file, toutes les 2 s
+    P->>MQ: OutboxRelay publie les messages échus (50 maximum par passage)
     MQ->>T: payment.transaction.recorded × 2
     T->>T: ajout, idempotent sur transaction_id
 ```
 
 La réponse au client n'attend pas le broker : la publication est au moins une
-fois via l'outbox, et le ledger rattrape son retard quelques secondes plus tard.
+fois via l’outbox. Le délai de mise à jour du ledger dépend du broker, du
+relais et du consommateur ; il n’est pas garanti en cas de panne.
 
 #### Le flux de compensation
 
@@ -970,10 +1016,11 @@ sequenceDiagram
     participant MQ as RabbitMQ
 
     C->>P: POST /payments
-    P->>DB: INSERT paiement (Pending) → UPDATE (Processing)
+    P->>DB: COMMIT clé, paiement Pending et référence de réponse
+    P->>DB: verrou du paiement puis UPDATE (Processing)
     P->>A: debit(source), clé pay_01hq…
     A-->>P: 200 Approved (trx_…)
-    Note over P,A: la source est désormais à découvert
+    Note over P,A: le débit source est appliqué
 
     P->>A: credit(destination), clé pay_01hq…:credit
     A-->>P: refus métier confirmé (sans tentative antérieure incertaine)
@@ -985,18 +1032,34 @@ sequenceDiagram
         A-->>P: 200 Approved (trx_…)
         Note over P,DB: une seule transaction
         P->>DB: UPDATE paiement (Compensated)
-        P->>DB: INSERT outbox (REFUND)
+        P->>DB: INSERT outbox (REFUND, payment.compensated)
         P-->>C: 201 { status: "Compensated" }
         P->>MQ: le relais publie le mouvement REFUND
     else le remboursement échoue aussi
-        P->>DB: UPDATE paiement (CompensationPending)
+        Note over P,DB: conserver CompensationPending
         P-->>C: 201 { status: "CompensationPending" }
-        Note over P: l'argent est au mauvais endroit, le réconciliateur<br/>réessaie chaque minute jusqu'à ce qu'il n'y soit plus
+        Note over P: réessais planifiés avec délai progressif et alerte
     end
 ```
 
 `CompensationPending` n'est délibérément pas terminal. Tous les autres états de
 fin le sont.
+
+### Concurrence des traitements
+
+`PostgresPaymentExecution` acquiert un verrou de session PostgreSQL par paiement
+pour toute la saga, appels HTTP compris. Les commandes imbriquées rejoignent ce
+verrou. Le réconciliateur utilise le même mécanisme et relit l’état avant d’agir.
+Un autre worker reçoit un conflit et peut réessayer ultérieurement.
+
+Chaque sauvegarde vérifie aussi la colonne `version` : une écriture périmée est
+rejetée au lieu d’écraser un état plus récent. Les transactions locales réutilisent
+la connexion du verrou et commitent séparément ; aucune transaction de saga
+n’est maintenue ouverte pendant les appels HTTP.
+
+Une perte de session libère le verrou, mais n’annule pas une requête HTTP déjà
+partie. Les clés idempotentes et la résolution des résultats inconnus restent
+nécessaires.
 
 ### Quand `accounts` ne répond plus
 
@@ -1043,8 +1106,16 @@ BEGIN → INSERT de la clé ON CONFLICT DO NOTHING
        └─ COMPLETED                       → renvoyer la réponse stockée, inchangée
 ```
 
-L'empreinte est canonique : un corps JSON réordonné est reconnu comme la même
-requête, un montant modifié ne l'est pas.
+L’empreinte est canonique : un corps JSON réordonné est reconnu comme la même
+requête, un montant modifié ne l’est pas. La réservation, le paiement et sa
+référence commitent ensemble ; une erreur avant commit annule le tout. Une
+erreur ultérieure dans la saga ne supprime pas la clé.
+
+`COMPLETED` décrit la création durable, pas l’approbation du transfert. Le
+réessai retrouve la même référence sans relancer la saga ; le contrôleur relit
+l’état courant, qui peut encore être `Pending` ou `Processing`. Une clé
+`IN_PROGRESS` persistante issue de l’ancien protocole est traitée par la
+migration de réparation.
 
 ### Parler à `accounts`
 
@@ -1056,42 +1127,89 @@ statut.
 Réessayable et non réessayable sont strictement séparés. Un timeout, un
 `ECONNREFUSED`, un 5xx ou un 429 obtiennent un backoff exponentiel avec pleine
 gigue ; un 4xx métier, non, parce que réessayer une décision perd du temps et
-risque un second mouvement. Un paiement refusé ne compte jamais pour l'ouverture
+ne résout pas une indisponibilité. Un paiement refusé ne compte jamais pour l'ouverture
 du circuit : un refus signifie que le service est debout et répond.
 
 ### Outbox transactionnel
 
-Les lignes d'`outbox` sont écrites dans la même transaction que le changement
-d'état qui les justifie, et un relais `@Cron` les publie vers RabbitMQ toutes les
-deux secondes, en ne marquant `published_at` qu'une fois le message accepté par
-le broker. La publication est donc au moins une fois, le paiement n'attend jamais
-le broker, et les consommateurs sont idempotents sur `transaction_id`, ce qui
-rend les doublons inoffensifs.
+Les messages de ledger et les notifications de cycle de vie sont écrits dans
+la transaction du changement d’état. `PaymentEvents.enqueue` est attendu avant
+le commit : un échec d’insertion annule aussi la modification du paiement.
 
-`GET /health` publie la profondeur de l'outbox : un nombre qui ne cesse de monter
-signale que le relais ou le broker est en difficulté.
+Le relais se déclenche toutes les deux secondes et traite au plus 50 messages
+par passage. Chaque message est sélectionné dans une transaction avec
+`FOR UPDATE SKIP LOCKED`, pour répartir le travail entre instances. La publication
+expire après cinq secondes ; `published_at` n’est renseigné qu’après acceptation
+par le broker.
+
+Un crash entre l’accusé du broker et le commit local peut entraîner une
+rediffusion. La livraison est **au moins une fois** ; le consommateur du ledger
+déduplique sur `transaction_id`. Les échecs sont espacés progressivement. Après
+dix tentatives, le message reste stocké et une alerte `OUTBOX NEEDS ATTENTION`
+demande une intervention.
 
 ### Réconciliation
 
-Un travail `@Cron` reprend chaque minute les paiements bloqués en `Processing`
-depuis plus de cinq minutes, ainsi que les paiements en `CompensationPending`.
-Si le débit est enregistré mais le crédit incertain, il recherche le mouvement
-`:credit` : un mouvement retrouvé permet d’approuver le paiement et de publier
-les deux mouvements comptables dans la même transaction. Une lecture vide ou
-indisponible laisse `Processing`, sans remboursement ni nouveau crédit.
+Le job s’exécute chaque minute et sélectionne au plus 20 paiements sans progrès
+depuis cinq minutes, dont l’échéance de reprise est atteinte. Il couvre les
+trois états non terminaux et relit chacun sous le verrou partagé :
 
-Cette politique privilégie la sûreté : une requête initiale peut encore aboutir
-après une lecture vide. Si aucun crédit n’apparaît, une intervention reste
-nécessaire pour établir définitivement son issue. Une annulation atomique de
-la clé côté `accounts` serait nécessaire pour automatiser ce remboursement.
-Les décisions de remboursement confirmées en `CompensationPending` sont réessayées.
+| État | Reprise |
+|---|---|
+| `Pending` | Démarrer la saga interrompue après le commit de création |
+| `Processing` | Rechercher les mouvements nécessaires pour établir leur issue ; approuver si le crédit est retrouvé |
+| `CompensationPending` | Réessayer le remboursement confirmé sous sa clé idempotente |
+
+Une lecture du crédit vide ou indisponible ne déclenche pas de remboursement :
+la requête initiale peut encore aboutir. Sans confirmation définitive, le
+paiement reste `Processing` et peut nécessiter une intervention. Une annulation
+atomique de la clé côté `accounts` serait nécessaire pour automatiser davantage.
+
+Chaque essai persiste `reconciliation_attempts`, `next_reconciliation_at` et
+`last_reconciliation_error`. Les délais progressent de 1, 2, 4… minutes jusqu’à
+une heure. Après dix tentatives non résolues, le job journalise
+`RECONCILIATION NEEDS ATTENTION` et poursuit les réessais.
+
+### Métriques et relance de l’outbox
+
+Depuis `services/payments`, avec l’environnement PostgreSQL du service :
+
+```sh
+pnpm ops metrics
+pnpm ops retry-outbox <uuid-du-message>
+```
+
+Dans une image compilée sans les outils de développement, l’équivalent est
+`node dist/infrastructure/operations/cli.js metrics` ou
+`node dist/infrastructure/operations/cli.js retry-outbox <uuid-du-message>`
+depuis le répertoire du service.
+
+| Métrique | Signification |
+|---|---|
+| `outbox_pending` | Messages non publiés, y compris ceux dont les tentatives sont épuisées |
+| `outbox_exhausted` | Messages non publiés ayant atteint dix tentatives |
+| `oldest_unpublished_seconds` | Âge du plus ancien message non publié |
+| `payments_stuck` | Paiements non terminaux sans progrès depuis cinq minutes |
+| `compensations_pending` | Paiements en `CompensationPending` |
+| `reconciliation_attention` | Paiements non terminaux ayant au moins dix tentatives de reprise |
+
+Les métriques sont aussi journalisées chaque minute. Un système externe doit
+collecter ces logs et acheminer les alertes. `GET /health` expose uniquement la
+profondeur de l’outbox en complément de la santé du service et de la base.
+
+Après correction de la cause de l’échec, `retry-outbox` réactive un message
+épuisé non publié en conservant son identifiant et son payload. Il ne rejoue pas
+un message déjà marqué publié. La commande retourne un code de sortie non nul
+si aucune ligne n’a été réactivée. Ces outils utilisent les droits PostgreSQL
+de l’opérateur et n’ajoutent aucune route publique.
 
 ### Suivre un paiement à travers les trois services
 
 Chaque ligne de log est du JSON portant `service_name` et `correlation_id`.
 L'identifiant vient de `x-correlation-id` quand l'appelant en envoie un, est créé
-sinon, est renvoyé dans la réponse, accompagne chaque appel sortant et voyage
-dans chaque message d'outbox. L'ajout au ledger déclenché par la file apparaît
+sinon, est renvoyé dans la réponse, accompagne les appels HTTP sortants et les
+messages de mouvements produits par `TransactionsOutboxAdapter`. Les notifications
+de cycle de vie ne portent pas actuellement ce champ. L'ajout au ledger déclenché par la file apparaît
 donc sous le même identifiant que la requête HTTP qui l'a causé.
 
 ```
@@ -1101,7 +1219,6 @@ $ docker compose logs | grep corr-trace-1788724469
   accounts-1       -                               request completed
   payments-1       CreditDestinationWalletHandler  payment approved
   accounts-1       -                               request completed
-  payments-1       OutboxRelay                     outbox message published
   transactions-1   TransactionsEventsController    movement appended to the ledger
   transactions-1   TransactionsEventsController    movement appended to the ledger
 ```
@@ -1226,30 +1343,30 @@ Je préfère le dire ici plutôt que laisser quelqu'un le découvrir en producti
   production ils devraient venir d'un coffre, et tourner.
 - **Pas de journal d'audit des accès.** Les mouvements sont tracés, les
   tentatives d'accès refusées ne le sont qu'en log applicatif.
-- **Le rate limiter compte par IP.** Derrière un NAT, plusieurs clients partagent
+- **Le rate limiter utilise l’IP en l’absence de clé interne.** Derrière un NAT, plusieurs clients partagent
   un seau. C'est le compromis habituel tant qu'il n'y a pas d'identité : une fois
   l'authentification en place, le compteur devrait porter sur l'utilisateur.
 
-## Les points non négociables, et où chacun est garanti
+## Garanties et vérifications
 
-| Exigence | Où elle est garantie |
+| Propriété | Mécanisme ou vérification |
 |----------|----------------------|
 | `docker compose up` depuis un clone frais donne un système fonctionnel | `make up && make migrate && make seed` ; chaque `depends_on` attend `service_healthy` |
-| `make test` passe intégralement | 232 tests unitaires et d'intégration sur les quatre paquets |
+| Tests automatisés | Dernière validation : 191 tests de `payments` ; voir la section tests pour le périmètre et les limites |
 | Aucun `synchronize: true`, uniquement des migrations | `synchronize: false` dans les trois `data-source.ts` ; `make migrate` |
 | Aucun secret dans le code, `.env` validé au démarrage | `EnvConfig` + `validate: validateEnv` par service, voir [décision 20](DECISIONS.md#20-lenvironnement-est-validé-avec-class-validator-et-non-joi) |
 | Aucun `any` implicite, `strict: true` | `tsconfig.base.json`, hérité par tous les paquets |
 | `domain/` n'importe ni NestJS ni TypeORM | `no-restricted-imports` **et** `src/architecture.spec.ts`, qui vérifie aussi qu'il échoue sur une violation |
 | `Payment` et `PaymentOrmEntity` sont distincts, reliés par un mapper | `domain/model/payment.ts`, `infrastructure/persistence/entities/payment.orm-entity.ts`, `mappers/payment.orm-mapper.ts` |
-| La machine à états est testable sans base ni HTTP | `domain/model/payment.spec.ts`, 22 tests, toutes les transitions interdites couvertes |
+| La machine à états est testable sans base ni HTTP | `domain/model/payment.spec.ts` couvre les transitions autorisées et refusées |
 | Le contrôleur ne touche que `commandBus` et `queryBus` | `presentation/payments.controller.ts` : ce sont ses deux seules dépendances |
 | Les commandes renvoient une référence, jamais l'agrégat | `InitiatePaymentResult` vaut `{ reference: string }` |
 | Les requêtes lisent une projection, jamais l'agrégat | `PaymentReadPort` au-dessus de la vue `payment_read_model` |
 | Les événements de domaine sont durables avec le paiement | `PaymentEvents.enqueue` est attendu dans `transaction.run(...)` ; le relais publie après commit |
-| Aucun flottant sur un montant, nulle part | colonnes `bigint` avec transformateur entier ; `Money` refuse un non-entier |
+| Montants entiers | Colonnes `bigint`, validation des montants et `Money` ; la conversion en `number` impose de borner aussi les soldes cumulés |
 | Chaque endpoint interne est protégé | `InternalApiKeyGuard` sur `credit` et `debit` ; un appel sans identifiants est un 401 |
-| Les cinq scénarios e2e passent | `services/payments/test/payments.e2e-spec.ts`, lancés par `make test:e2e-isolated` |
-| Un `correlation_id` suit un paiement à travers les trois services | `x-correlation-id` en entrée, créé s'il manque, renvoyé en sortie, porté par chaque appel sortant et dans chaque message d'outbox |
+| Scénarios e2e définis | `services/payments/test/payments.e2e-spec.ts` ; dernière exécution bloquée au téléchargement Docker |
+| Un `correlation_id` suit un paiement à travers les trois services | `x-correlation-id` en entrée, créé s'il manque, renvoyé en sortie, porté par les appels HTTP et les messages de mouvements ; les notifications de cycle de vie restent à compléter |
 
 ## Ce que je ferais ensuite
 
@@ -1257,17 +1374,18 @@ Par ordre de ce que je prendrais en premier si je reprenais le projet demain.
 
 1. **L'authentification** (voir plus haut). Rien d'autre ne compte tant que la
    porte d'entrée est ouverte.
-2. **Métriques et tracing.** Il y a des logs corrélés, ce qui suffit pour
-   déboguer un paiement, pas pour répondre à « combien de paiements par minute
-   et quelle latence au p99 ». Prometheus plus OpenTelemetry, une journée.
-3. **Les crons en multi-instance.** Le relais d'outbox et le réconciliateur
-   supposent aujourd'hui une seule instance : deux répliques feraient le travail
-   en double. Un `SELECT … FOR UPDATE SKIP LOCKED` sur les lots règle les deux,
-   et le breaker comme le rate limiter demanderaient un Redis partagé.
+2. **Collecte des métriques et tracing distribué.** Les compteurs d’exploitation,
+   logs périodiques et commandes locales existent. Il reste à les intégrer à un
+   système de supervision et à mesurer les latences et débits réels.
+3. **Pannes de session et résultats inconnus.** Les workers sont coordonnés par
+   les verrous PostgreSQL et les versions. Il reste à traiter le cas d’un appel
+   distant encore en cours après la perte du verrou, avec un protocole de
+   résolution définitive ou d’annulation côté `accounts`.
 4. **Une CI.** Tout est prêt (`make test`, `make test:e2e-isolated`), il manque
    le fichier de workflow.
 5. **La rétention.** `idempotency_keys` et `outbox` grossissent indéfiniment.
-   Une purge des lignes publiées de plus de 30 jours, et c'est réglé.
+   Définir une durée de conservation et une politique de purge, sans supprimer
+   prématurément les clés nécessaires à la déduplication.
 6. **Le versionnement de l'API.** Aucun préfixe `/v1` aujourd'hui, ce qui sera
    pénible le jour où un champ doit changer de forme.
 
@@ -1290,58 +1408,3 @@ vérifiée par `pg_isready` sur les bases et par `GET /health` sur les
 applications, et chaque `depends_on` attend `condition: service_healthy` :
 `payments` ne démarre qu'une fois qu'`accounts` et `transactions` répondent
 vraiment.
-
-
-### Reprise de l’idempotence
-
-La clé d’idempotence, la création Pending et la réponse contenant la référence
-commitent ensemble, avant la saga. Un réessai peut donc recevoir le paiement
-encore en cours ; il consulte son état sans lancer un second transfert. Une
-erreur après ce commit ne supprime jamais la clé.
-
-Avant la migration `RecoverIdempotency1789084800000`, arrêter les anciennes
-instances de payments. Elle rattache les clés abandonnées aux paiements
-existants et retire les réservations sans paiement. Les nouvelles réservations
-ne peuvent plus survivre seules à un crash.
-
-
-### Planification des reprises
-
-La migration `ReconciliationSchedule1789084802000` ajoute le compteur de
-reprises, leur prochaine échéance et leur dernière erreur. Le job examine
-Pending, Processing et CompensationPending après cinq minutes sans progrès.
-Il relit l’état sous verrou : Pending reprend la saga, les deux autres états
-résolvent le mouvement ou réessaient un remboursement confirmé.
-Un résultat encore inconnu reste en attente, sans remboursement aveugle.
-Les reprises sont espacées de 1, 2, 4… minutes jusqu’à une heure ; dix tentatives
-non résolues produisent `RECONCILIATION NEEDS ATTENTION` dans les logs.
-
-
-### Outbox transactionnel et exploitation
-
-Les événements de cycle de vie sont désormais écrits par `PaymentEvents` dans
-la transaction de l’état et des mouvements comptables. Une erreur d’outbox annule
-la transaction. Le relais ne traite que des lignes commitées et réserve chaque
-message avec `FOR UPDATE SKIP LOCKED`. Les publications ont un délai maximum de
-cinq secondes et les échecs sont réessayés avec un délai progressif. Après dix
-échecs, le message reste conservé et une alerte `OUTBOX NEEDS ATTENTION` est émise.
-
-Depuis `services/payments`, avec l’environnement PostgreSQL du service :
-
-```sh
-pnpm ops metrics
-pnpm ops retry-outbox <uuid-du-message>
-```
-
-`metrics` fournit les messages en attente et épuisés, l’âge du plus ancien,
-les paiements bloqués, les compensations en attente et les reprises nécessitant
-une intervention. Les mêmes métriques sont journalisées chaque minute.
-`retry-outbox` réactive uniquement un message épuisé non publié, après correction
-de la cause de l’échec. Son identifiant et son payload sont conservés ; les
-consommateurs doivent rester idempotents car un accusé broker peut être perdu.
-Ces outils locaux utilisent les droits PostgreSQL de l’opérateur et n’ajoutent
-aucune route publique.
-
-Appliquer les quatre nouvelles migrations avant le démarrage des nouvelles
-instances. Arrêter d’abord les anciennes instances payments pour la réparation
-d’idempotence. Aucun changement d’authentification n’est inclus.
