@@ -24,7 +24,9 @@ export const DEBIT = Reference.of('trx', 'trx_01hq3m8x0000zt7k9d2v4bqf1c');
 export const CREDIT = Reference.of('trx', 'trx_01hq3m8x0000zt7k9d2v4bqf9z');
 export const REFUND = Reference.of('trx', 'trx_01hq3m8x0000zt7k9d2v4bqfaa');
 
-export function aPayment(overrides: Partial<{ amount: number; description: string }> = {}): Payment {
+export function aPayment(
+  overrides: Partial<{ amount: number; description: string }> = {},
+): Payment {
   return Payment.initiate({
     transactionId: 'tx-00000001',
     money: Money.of(overrides.amount ?? 5_000, Currency.XOF),
@@ -117,9 +119,15 @@ export class InMemoryIdempotencyRepository implements IdempotencyRepository {
     return Promise.resolve();
   }
 
-  release(key: string): Promise<void> {
-    this.rows.delete(key);
-    return Promise.resolve();
+  async transaction<T>(work: () => Promise<T>): Promise<T> {
+    const before = new Map(this.rows);
+    try {
+      return await work();
+    } catch (error) {
+      this.rows.clear();
+      before.forEach((value, key) => this.rows.set(key, value));
+      throw error;
+    }
   }
 
   get size(): number {

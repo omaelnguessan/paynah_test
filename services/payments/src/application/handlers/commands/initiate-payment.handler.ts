@@ -3,10 +3,7 @@ import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
 import { Money } from '../../../domain/model/money';
 import { Payment } from '../../../domain/model/payment';
 import { Reference } from '../../../domain/model/reference';
-import {
-  PAYMENT_REPOSITORY,
-  PaymentRepository,
-} from '../../../domain/ports/payment.repository';
+import { PAYMENT_REPOSITORY, PaymentRepository } from '../../../domain/ports/payment.repository';
 import {
   TRANSACTION_RUNNER,
   TransactionRunner,
@@ -56,8 +53,6 @@ export class InitiatePaymentHandler implements ICommandHandler<InitiatePaymentCo
           'payment initiated',
         );
 
-        await this.saga.run(payment.reference);
-
         return {
           result: { reference: payment.reference.value },
           paymentReference: payment.reference.value,
@@ -65,6 +60,9 @@ export class InitiatePaymentHandler implements ICommandHandler<InitiatePaymentCo
       },
     );
 
+    if (!outcome.replayed) {
+      await this.saga.run(Reference.of('pay', outcome.result.reference));
+    }
     return outcome.result;
   }
 }

@@ -282,8 +282,8 @@ describe('payments (e2e)', () => {
       );
 
       expect(references.size).toBe(1);
-      // Whoever lost the race got a 409 rather than a second payment.
-      expect(attempts.every((a) => [201, 409].includes(a.status))).toBe(true);
+      // Concurrent callers wait for creation and receive the same durable reference.
+      expect(attempts.every((a) => a.status === 201)).toBe(true);
       expect(await balanceOf(source)).toBe(before - 100);
     });
   });

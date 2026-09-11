@@ -1,3 +1,5 @@
+import { TRANSACTION_RUNNER } from '../../domain/ports/transaction-runner.port';
+import { inlineTransaction } from '../../testing/doubles';
 import { Test } from '@nestjs/testing';
 import {
   IdempotencyConflictError,
@@ -23,7 +25,11 @@ describe('IdempotencyService', () => {
   beforeEach(async () => {
     jest.resetAllMocks();
     const moduleRef = await Test.createTestingModule({
-      providers: [IdempotencyService, { provide: IDEMPOTENCY_REPOSITORY, useValue: keys }],
+      providers: [
+        IdempotencyService,
+        { provide: IDEMPOTENCY_REPOSITORY, useValue: keys },
+        { provide: TRANSACTION_RUNNER, useValue: inlineTransaction },
+      ],
     }).compile();
     service = moduleRef.get(IdempotencyService);
   });
@@ -49,14 +55,14 @@ describe('IdempotencyService', () => {
       expect(outcome).toEqual({ result: { reference: 'pay_x' }, replayed: false });
     });
 
-    it('releases the claim when the work fails, so a retry is possible', async () => {
+    it('propagates a failure to roll back the transaction without deleting a key', async () => {
       keys.claim.mockResolvedValue(true);
 
       await expect(
         service.execute('tx-00000001', payload, () => Promise.reject(new Error('boom'))),
       ).rejects.toThrow('boom');
 
-      expect(keys.release).toHaveBeenCalledWith('tx-00000001');
+      expect(keys.release).not.toHaveBeenCalled();
       expect(keys.complete).not.toHaveBeenCalled();
     });
   });
@@ -131,7 +137,9 @@ describe('IdempotencyService', () => {
     });
 
     it('distinguishes a missing field from a null one', () => {
-      expect(IdempotencyService.hash({ a: 1 })).not.toBe(IdempotencyService.hash({ a: 1, b: null }));
+      expect(IdempotencyService.hash({ a: 1 })).not.toBe(
+        IdempotencyService.hash({ a: 1, b: null }),
+      );
     });
 
     it('is stable across nesting and arrays', () => {

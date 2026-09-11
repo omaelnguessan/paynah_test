@@ -19,9 +19,11 @@ export interface IdempotencyRepository {
    */
   claim(key: string, requestHash: string): Promise<boolean>;
   find(key: string): Promise<IdempotencyRecord | null>;
-  complete(key: string, paymentReference: string, responseBody: Record<string, unknown>): Promise<void>;
-  /** Releases a claim whose work failed, so the caller may retry. */
-  release(key: string): Promise<void>;
+  complete(
+    key: string,
+    paymentReference: string,
+    responseBody: Record<string, unknown>,
+  ): Promise<void>;
 }
 
 export const IDEMPOTENCY_REPOSITORY = Symbol('IDEMPOTENCY_REPOSITORY');

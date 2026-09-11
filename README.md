@@ -1291,3 +1291,16 @@ vérifiée par `pg_isready` sur les bases et par `GET /health` sur les
 applications, et chaque `depends_on` attend `condition: service_healthy` :
 `payments` ne démarre qu'une fois qu'`accounts` et `transactions` répondent
 vraiment.
+
+
+### Reprise de l’idempotence
+
+La clé d’idempotence, la création Pending et la réponse contenant la référence
+commitent ensemble, avant la saga. Un réessai peut donc recevoir le paiement
+encore en cours ; il consulte son état sans lancer un second transfert. Une
+erreur après ce commit ne supprime jamais la clé.
+
+Avant la migration `RecoverIdempotency1789084800000`, arrêter les anciennes
+instances de payments. Elle rattache les clés abandonnées aux paiements
+existants et retire les réservations sans paiement. Les nouvelles réservations
+ne peuvent plus survivre seules à un crash.

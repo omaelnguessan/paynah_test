@@ -545,3 +545,14 @@ Un refus reçu après une tentative HTTP incertaine reste lui-même incertain.
 
 Ce choix remplace la règle précédente « tout échec du crédit se compense ».
 Il ne résout pas la coordination de plusieurs orchestrateurs concurrents.
+
+
+## 26. L’idempotence commite avec la création du paiement
+
+La réservation, le paiement Pending et la réponse contenant sa référence sont
+une seule transaction locale. La saga commence après ce commit. Un crash avant
+commit annule le tout ; un crash après permet de relire la même référence sans
+recréer de paiement ni rejouer ses mouvements. COMPLETED décrit ici la création
+de la ressource, pas la fin du transfert. Les requêtes concurrentes attendent la
+transaction qui possède la clé. La migration de réparation des anciennes clés
+doit être exécutée avec les anciennes instances payments arrêtées.

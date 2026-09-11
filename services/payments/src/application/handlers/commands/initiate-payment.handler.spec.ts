@@ -15,7 +15,6 @@ import {
   InMemoryIdempotencyRepository,
   InMemoryPaymentRepository,
   SOURCE,
-  inlineTransaction,
 } from '../../../testing/doubles';
 import { InitiatePaymentCommand } from '../../commands/initiate-payment.command';
 import { PaymentSaga } from '../../sagas/payment.saga';
@@ -40,7 +39,10 @@ describe('InitiatePaymentHandler', () => {
         IdempotencyService,
         { provide: IDEMPOTENCY_REPOSITORY, useValue: keys },
         { provide: PAYMENT_REPOSITORY, useValue: payments },
-        { provide: TRANSACTION_RUNNER, useValue: inlineTransaction },
+        {
+          provide: TRANSACTION_RUNNER,
+          useValue: { run: (work: () => Promise<unknown>) => keys.transaction(work) },
+        },
         { provide: PaymentSaga, useValue: saga },
         { provide: EventBus, useValue: events },
       ],
@@ -104,15 +106,22 @@ describe('InitiatePaymentHandler', () => {
     await inFlight;
   });
 
-  it('frees the key when the attempt fails, so the caller may retry it', async () => {
+  it('keeps the same reference when the saga fails after the creation commit', async () => {
     saga.run.mockRejectedValueOnce(new Error('the process died mid-saga'));
-
     await expect(handler.execute(command())).rejects.toThrow('the process died mid-saga');
-    expect(keys.size).toBe(0);
+    expect(keys.size).toBe(1);
+    const reference = payments.saved[0].reference.value;
+    await expect(handler.execute(command())).resolves.toEqual({ reference });
+    expect(payments.saved).toHaveLength(1);
+    expect(saga.run).toHaveBeenCalledTimes(1);
+  });
 
-    saga.run.mockResolvedValueOnce(undefined);
+  it('rolls back the key when creating the payment fails before commit', async () => {
+    jest.spyOn(payments, 'save').mockRejectedValueOnce(new Error('database failure'));
+    await expect(handler.execute(command())).rejects.toThrow('database failure');
+    expect(keys.size).toBe(0);
     await expect(handler.execute(command())).resolves.toMatchObject({
-      reference: expect.stringMatching(/^pay_/),
+      reference: expect.any(String),
     });
   });
 
@@ -125,5 +134,4 @@ describe('InitiatePaymentHandler', () => {
     expect(payments.saved).toEqual([]);
     expect(saga.run).not.toHaveBeenCalled();
   });
-
 });

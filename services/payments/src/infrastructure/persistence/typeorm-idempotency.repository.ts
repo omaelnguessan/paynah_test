@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { isUniqueViolation } from '@paynad/shared';
 import {
   IdempotencyRecord,
   IdempotencyRepository,
@@ -21,21 +20,14 @@ export class TypeOrmIdempotencyRepository implements IdempotencyRepository {
    * somebody else already owns this key.
    */
   async claim(key: string, requestHash: string): Promise<boolean> {
-    try {
-      await this.repository.insert({
-        key,
-        request_hash: requestHash,
-        status: IdempotencyStatus.IN_PROGRESS,
-        payment_reference: null,
-        response_body: null,
-      });
-      return true;
-    } catch (error) {
-      if (isUniqueViolation(error)) {
-        return false;
-      }
-      throw error;
-    }
+    // ON CONFLICT preserves the surrounding transaction; catching a unique
+    // violation would leave PostgreSQL's transaction aborted.
+    const rows: Array<{ key: string }> = await this.context.manager.query(
+      `INSERT INTO idempotency_keys (key, request_hash, status)
+       VALUES ($1, $2, $3) ON CONFLICT (key) DO NOTHING RETURNING key`,
+      [key, requestHash, IdempotencyStatus.IN_PROGRESS],
+    );
+    return rows.length === 1;
   }
 
   async find(key: string): Promise<IdempotencyRecord | null> {
@@ -64,9 +56,5 @@ export class TypeOrmIdempotencyRepository implements IdempotencyRepository {
         response_body: responseBody,
       },
     );
-  }
-
-  async release(key: string): Promise<void> {
-    await this.repository.delete({ key, status: IdempotencyStatus.IN_PROGRESS });
   }
 }

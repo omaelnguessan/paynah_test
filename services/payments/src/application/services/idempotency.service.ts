@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { TRANSACTION_RUNNER, TransactionRunner } from '../../domain/ports/transaction-runner.port';
 import {
   IDEMPOTENCY_REPOSITORY,
   IdempotencyRepository,
@@ -28,6 +29,7 @@ export class IdempotencyService {
 
   constructor(
     @Inject(IDEMPOTENCY_REPOSITORY) private readonly keys: IdempotencyRepository,
+    @Inject(TRANSACTION_RUNNER) private readonly transaction: TransactionRunner,
   ) {}
 
   /** Stable hash of the payload, so the same key with a different body is caught. */
@@ -40,22 +42,17 @@ export class IdempotencyService {
     payload: unknown,
     work: () => Promise<{ result: T; paymentReference: string }>,
   ): Promise<IdempotentOutcome<T>> {
-    const requestHash = IdempotencyService.hash(payload);
-
-    if (!(await this.keys.claim(key, requestHash))) {
-      return { result: await this.resolveExisting(key, requestHash), replayed: true };
-    }
-
-    try {
+    // The callback may only perform local database writes. The key, payment
+    // and stable response commit together, before any remote side effect.
+    return this.transaction.run(async () => {
+      const requestHash = IdempotencyService.hash(payload);
+      if (!(await this.keys.claim(key, requestHash))) {
+        return { result: await this.resolveExisting<T>(key, requestHash), replayed: true };
+      }
       const { result, paymentReference } = await work();
       await this.keys.complete(key, paymentReference, result);
       return { result, replayed: false };
-    } catch (error) {
-      // Nothing was recorded, so the claim must not outlive the attempt —
-      // otherwise a transient failure would lock the key out for good.
-      await this.keys.release(key);
-      throw error;
-    }
+    });
   }
 
   private async resolveExisting<T>(key: string, requestHash: string): Promise<T> {
