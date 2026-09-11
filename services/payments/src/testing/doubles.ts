@@ -75,6 +75,10 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     return Promise.resolve(this.stored);
   }
 
+  recordRecoveryAttempt(): Promise<number> {
+    return Promise.resolve(1);
+  }
+
   findStuck(): Promise<Payment[]> {
     return Promise.resolve([]);
   }

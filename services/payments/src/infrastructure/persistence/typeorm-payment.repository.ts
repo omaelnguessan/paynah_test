@@ -1,6 +1,6 @@
 import { ConcurrentPaymentError } from '../../domain/errors/concurrent-payment.error';
 import { Injectable } from '@nestjs/common';
-import { LessThan, In } from 'typeorm';
+import { LessThan, LessThanOrEqual, In } from 'typeorm';
 import { Payment } from '../../domain/model/payment';
 import { PaymentStatus } from '../../domain/model/payment-status';
 import { Reference } from '../../domain/model/reference';
@@ -61,14 +61,31 @@ export class TypeOrmPaymentRepository implements PaymentRepository {
     return row ? this.hydrate(row) : null;
   }
 
+  async recordRecoveryAttempt(reference: Reference, error: string | null): Promise<number> {
+    return this.context.run(async () => {
+      const rows: Array<{ reconciliation_attempts: number }> = await this.context.manager.query(
+        `UPDATE payments SET reconciliation_attempts = reconciliation_attempts + 1,
+         last_reconciliation_error = $2,
+         next_reconciliation_at = now() + least(3600, 60 * power(2, least(reconciliation_attempts, 6))) * interval '1 second'
+         WHERE reference = $1 RETURNING reconciliation_attempts`,
+        [reference.value, error?.slice(0, 2000) ?? null],
+      );
+      return rows[0]?.reconciliation_attempts ?? 0;
+    });
+  }
+
   async findStuck(
     statuses: readonly PaymentStatus[],
     olderThan: Date,
     limit: number,
   ): Promise<Payment[]> {
     const rows = await this.repository.find({
-      where: { status: In([...statuses]), updated_at: LessThan(olderThan) },
-      order: { updated_at: 'ASC' },
+      where: {
+        status: In([...statuses]),
+        updated_at: LessThan(olderThan),
+        next_reconciliation_at: LessThanOrEqual(new Date()),
+      },
+      order: { next_reconciliation_at: 'ASC', updated_at: 'ASC' },
       take: limit,
     });
     return rows.map((row) => this.hydrate(row));

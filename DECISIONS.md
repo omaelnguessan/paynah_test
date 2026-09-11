@@ -571,3 +571,13 @@ Le débit vérifie l’état Pending avant tout effet externe.
 Une session PostgreSQL perdue libère son verrou ; cela n’annule pas un appel
 HTTP déjà parti. Le traitement des résultats inconnus et les clés idempotentes
 restent donc nécessaires, même avec cette exclusion mutuelle.
+
+
+## 28. Chaque état non terminal a une stratégie de reprise
+
+Le réconciliateur inclut Pending et reprend sa saga après avoir relu le paiement
+sous le verrou partagé. Processing résout les mouvements inconnus, et
+CompensationPending réessaie le remboursement. Les états terminaux sont ignorés.
+Chaque essai persiste son compteur, sa dernière erreur et une prochaine échéance
+avec délai exponentiel plafonné à une heure. Après dix essais non résolus, une
+alerte de niveau erreur demande une intervention, sans abandonner les réessais.

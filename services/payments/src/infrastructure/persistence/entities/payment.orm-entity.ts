@@ -44,6 +44,15 @@ export class PaymentOrmEntity {
   @Column({ type: 'varchar', length: 255 })
   description: string;
 
+  @Column({ type: 'int', default: 0 })
+  reconciliation_attempts: number;
+
+  @Column({ type: 'timestamptz', default: () => 'now()' })
+  next_reconciliation_at: Date;
+
+  @Column({ type: 'text', nullable: true })
+  last_reconciliation_error: string | null;
+
   @Column({ type: 'int', default: 1 })
   version: number;
 

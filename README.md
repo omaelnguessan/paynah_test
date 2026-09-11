@@ -1304,3 +1304,15 @@ Avant la migration `RecoverIdempotency1789084800000`, arrêter les anciennes
 instances de payments. Elle rattache les clés abandonnées aux paiements
 existants et retire les réservations sans paiement. Les nouvelles réservations
 ne peuvent plus survivre seules à un crash.
+
+
+### Planification des reprises
+
+La migration `ReconciliationSchedule1789084802000` ajoute le compteur de
+reprises, leur prochaine échéance et leur dernière erreur. Le job examine
+Pending, Processing et CompensationPending après cinq minutes sans progrès.
+Il relit l’état sous verrou : Pending reprend la saga, les deux autres états
+résolvent le mouvement ou réessaient un remboursement confirmé.
+Un résultat encore inconnu reste en attente, sans remboursement aveugle.
+Les reprises sont espacées de 1, 2, 4… minutes jusqu’à une heure ; dix tentatives
+non résolues produisent `RECONCILIATION NEEDS ATTENTION` dans les logs.
