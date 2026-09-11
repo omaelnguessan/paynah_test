@@ -126,6 +126,15 @@ describe('AccountsHttpClient', () => {
     });
   });
 
+  it('keeps a refusal after a failed attempt uncertain', async () => {
+    nock(BASE_URL).post(`/accounts/${WALLET.value}/credit`).reply(503, {});
+    nock(BASE_URL).post(`/accounts/${WALLET.value}/credit`).reply(422, refused('WALLET_FROZEN'));
+    await expect(
+      client.credit(WALLET, MONEY, `${PAYMENT.value}:credit`, DETAILS),
+    ).rejects.toBeInstanceOf(AccountsUnavailableError);
+    expect(nock.isDone()).toBe(true);
+  });
+
   describe('translating refusals', () => {
     it.each([
       ['INSUFFICIENT_BALANCE', 422, InsufficientBalanceError],
@@ -302,17 +311,15 @@ describe('AccountsHttpClient', () => {
       nock(BASE_URL).post(`/accounts/${WALLET.value}/debit`).times(2).reply(503, unavailable);
 
       for (let attempt = 0; attempt < 2; attempt++) {
-        await expect(
-          breaking.debit(WALLET, MONEY, PAYMENT.value, DETAILS),
-        ).rejects.toBeInstanceOf(AccountsUnavailableError);
+        await expect(breaking.debit(WALLET, MONEY, PAYMENT.value, DETAILS)).rejects.toBeInstanceOf(
+          AccountsUnavailableError,
+        );
       }
       expect(nock.pendingMocks()).toEqual([]);
 
       // Nothing is intercepted from here on: with the circuit open the client
       // must fail fast, and nock refuses any call that would reach the network.
-      const error = await breaking
-        .debit(WALLET, MONEY, PAYMENT.value, DETAILS)
-        .catch((e) => e);
+      const error = await breaking.debit(WALLET, MONEY, PAYMENT.value, DETAILS).catch((e) => e);
 
       expect(error).toBeInstanceOf(AccountsUnavailableError);
       expect(error.details).toMatchObject({ cause: 'circuit open' });
@@ -329,9 +336,9 @@ describe('AccountsHttpClient', () => {
         .reply(422, refused('INSUFFICIENT_BALANCE'));
 
       for (let attempt = 0; attempt < 3; attempt++) {
-        await expect(
-          breaking.debit(WALLET, MONEY, PAYMENT.value, DETAILS),
-        ).rejects.toBeInstanceOf(InsufficientBalanceError);
+        await expect(breaking.debit(WALLET, MONEY, PAYMENT.value, DETAILS)).rejects.toBeInstanceOf(
+          InsufficientBalanceError,
+        );
       }
 
       // A poor customer must never take the service down for everyone else.

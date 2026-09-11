@@ -331,9 +331,9 @@ describe('payments (e2e)', () => {
     });
 
     it('refuses a payment to the wallet it came from', async () => {
-      const response = await initiate(
-        payment({ destination_wallet_reference: source }),
-      ).expect(422);
+      const response = await initiate(payment({ destination_wallet_reference: source })).expect(
+        422,
+      );
 
       expect(response.body.code).toBe(ResponseCode.VALIDATION_FAILED);
     });
@@ -371,12 +371,12 @@ describe('payments (e2e)', () => {
   describe('an unavailable downstream', () => {
     /**
      * The downstream-failure scenario: `accounts.credit` times out
-     * *after* the debit went through. Only the credit is stubbed — the debit
-     * and the refund go to the real service, because what is being tested is
-     * that the money actually comes back.
+     * after the debit went through, with or without applying the real credit.
+     * Neither outcome may refund the source on the strength of a timeout.
      */
     let stalled: INestApplication;
     let stalledHttp: request.Agent;
+    let creditLands = false;
 
     beforeAll(async () => {
       const real = app.get<AccountsPort>(ACCOUNTS_PORT);
@@ -388,7 +388,7 @@ describe('payments (e2e)', () => {
           if (key.endsWith(':refund')) {
             return real.credit(wallet, money, key, details);
           }
-          await new Promise((resolve) => setTimeout(resolve, 50));
+          if (creditLands) await real.credit(wallet, money, key, details);
           throw new AccountsUnavailableError('credit', 'TimeoutError: Timeout has occurred');
         },
       };
@@ -410,35 +410,38 @@ describe('payments (e2e)', () => {
       await stalled?.close();
     });
 
-    it('restores the source, compensates the payment and journalises the refund', async () => {
-      const before = { source: await balanceOf(source), destination: await balanceOf(destination) };
-
-      const response = await stalledHttp
-        .post('/payments')
-        .set('x-correlation-id', `e2e-${stamp}`)
-        .send(payment({ amount: 7_500 }))
-        .expect(201);
-      const data = response.body.data;
-
-      expect(data.status).toBe(PaymentStatus.Compensated);
-      expect(data.failure_reason).toBe('CREDIT_FAILED');
-      expect(data.debit_transaction_reference).toMatch(/^trx_/);
-      expect(data.credit_transaction_reference).toBeNull();
-
-      // The debit happened and was given back; the destination never saw a thing.
-      expect(await balanceOf(source)).toBe(before.source);
-      expect(await balanceOf(destination)).toBe(before.destination);
-
-      const lines = await eventually(
-        () => ledgerOf(source, data.reference),
-        (rows) => rows.some((line) => line.type === 'REFUND'),
-      );
-      // The refund is a movement of its own, offsetting the debit rather than
-      // amending it — the ledger is append-only.
-      expect(lines.map((line) => line.type).sort()).toEqual(['REFUND']);
-      expect(lines[0].reference).toMatch(/^trx_/);
-      expect(await ledgerOf(destination, data.reference)).toEqual([]);
-    }, 60_000);
+    it.each([false, true])(
+      'does not refund an uncertain credit (applied: %s)',
+      async (applied) => {
+        creditLands = applied;
+        const before = {
+          source: await balanceOf(source),
+          destination: await balanceOf(destination),
+        };
+        const response = await stalledHttp
+          .post('/payments')
+          .set('x-correlation-id', `e2e-${stamp}`)
+          .send(payment({ amount: 7_500 }))
+          .expect(201);
+        const data = response.body.data;
+        expect(data.status).toBe(applied ? PaymentStatus.Approved : PaymentStatus.Processing);
+        expect(await balanceOf(source)).toBe(before.source - 7_500);
+        expect(await balanceOf(destination)).toBe(before.destination + (applied ? 7_500 : 0));
+        const [stored] = await dataSource.query(
+          'SELECT refund_transaction_reference FROM payments WHERE reference = $1',
+          [data.reference],
+        );
+        expect(stored.refund_transaction_reference).toBeNull();
+        if (applied) {
+          const lines = await eventually(
+            () => ledgerOf(destination, data.reference),
+            (rows) => rows.some((line) => line.type === 'CREDIT'),
+          );
+          expect(lines.map((line) => line.type)).toEqual(['CREDIT']);
+        }
+      },
+      60_000,
+    );
   });
 
   describe('a debit whose outcome is unknown', () => {
@@ -616,9 +619,7 @@ describe('payments (e2e)', () => {
 
   describe('reading an unknown payment', () => {
     it('reports it as not found', async () => {
-      const response = await http
-        .get('/payments/pay_01hq3m8x0000zt7k9d2v4bqf1c')
-        .expect(404);
+      const response = await http.get('/payments/pay_01hq3m8x0000zt7k9d2v4bqf1c').expect(404);
 
       expect(response.body.message).toBe(ResponseMessage.TRANSACTION_NOT_FOUND);
     });

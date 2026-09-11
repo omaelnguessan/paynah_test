@@ -44,8 +44,8 @@ flowchart TB
 ```
 
 `payments` débite et crédite via `accounts` en REST, puis notifie `transactions`
-de façon asynchrone. Un débit refusé n'atteint jamais le ledger ; un crédit qui
-échoue est compensé par la saga.
+de façon asynchrone. Un débit refusé n'atteint jamais le ledger ; un crédit explicitement refusé
+est compensé. Un résultat de crédit inconnu est réconcilié sans remboursement automatique.
 
 ## Prérequis
 
@@ -270,8 +270,8 @@ sérieux :
 3. **Deux fois le même `transaction_id`** : une seule référence, un seul débit au
    ledger, et le rejeu renvoie la première réponse à l'octet près.
 4. **L'aval est indisponible** : `accounts.credit` est bouchonné en timeout
-   *après* un vrai débit ; la source est rétablie, le paiement passe
-   `Compensated`, et une ligne `REFUND` est journalisée.
+   après un vrai débit, avec ou sans crédit réellement appliqué. Aucun remboursement
+   n’est émis : un crédit retrouvé donne `Approved`, sinon le paiement reste `Processing`.
 5. **Dix paiements se disputent de quoi en couvrir six** : exactement six
    `Approved`, quatre `Declined`, le wallet finit à zéro, six débits distincts au
    ledger, et pas un solde négatif en chemin.
@@ -904,9 +904,10 @@ de la suite.
    qu'un crash laisse toujours quelque chose que le réconciliateur retrouvera ;
 2. `Processing`, puis `accounts.debit(source)`. Un refus décline le paiement et
    s'arrête là, rien n'ayant bougé ;
-3. `accounts.credit(destination)`. Cet échec-là ne peut pas décliner le paiement,
-   puisque la source est déjà à découvert. La seule réponse correcte est de
-   rendre l'argent ;
+3. `accounts.credit(destination)`. Un refus explicite est persisté en
+   `CompensationPending` avant remboursement. Un timeout ou une erreur de commit
+   laisse `Processing` : la lecture du mouvement `:credit` permet de confirmer
+   un succès sans rembourser la source ;
 4. l'approbation et les deux lignes d'outbox commitent **dans une seule
    transaction**, si bien que le ledger ne peut jamais entendre parler d'un
    paiement que la base a annulé.
@@ -975,8 +976,9 @@ sequenceDiagram
     Note over P,A: la source est désormais à découvert
 
     P->>A: credit(destination), clé pay_01hq…:credit
-    A--xP: timeout ou 5xx, après tous les réessais
-    Note over P: un crédit qui échoue ne peut pas décliner le paiement,<br/>la seule réponse correcte est de rendre l'argent
+    A-->>P: refus métier confirmé (sans tentative antérieure incertaine)
+    P->>DB: UPDATE paiement (CompensationPending)
+    Note over P: la décision de remboursement est persistée avant l’appel
 
     P->>A: credit(source), clé pay_01hq…:refund
     alt le remboursement passe
@@ -1006,13 +1008,13 @@ vocabulaire du domaine, et la saga les traite séparément.
 |--------------------|-----------------|------------|----------|
 | avant le débit, refus nommé (`INSUFFICIENT_BALANCE`, `WALLET_FROZEN`, …) | le service a répondu : rien n'a bougé | `Declined`, terminal | intact |
 | avant le débit, aucune réponse | on ignore si le débit a été appliqué | `Processing`, repris par le réconciliateur | à déterminer |
-| pendant le crédit | la source est déjà à découvert, seul le remboursement est correct | `Compensated` | mouvement net nul |
+| crédit explicitement refusé | décision de remboursement persistée puis remboursement | `Compensated` si remboursement réussi | mouvement net nul |
+| timeout ou panne de sauvegarde après crédit | lecture du mouvement destination, aucun remboursement sur une absence | `Approved` si crédit retrouvé, sinon `Processing` | à déterminer |
 | pendant le remboursement | le remboursement reste dû | `CompensationPending`, non terminal | dû |
 | processus tué en pleine saga | le paiement est déjà durable | `Processing` | à déterminer |
 
-Les trois lignes qui finissent « à déterminer » ont la même suite : le
-réconciliateur les reprend une minute plus tard et **demande à `accounts`**
-plutôt que de supposer. `GET /accounts/:reference/movements/:transaction_id`
+Pour un débit dont la référence n’a pas été enregistrée, le réconciliateur
+**demande à `accounts`** plutôt que de supposer. `GET /accounts/:reference/movements/:transaction_id`
 répond sous la clé d'idempotence du débit :
 
 - **un mouvement existe** : le débit était passé et seule sa réponse s'est
@@ -1072,10 +1074,17 @@ signale que le relais ou le broker est en difficulté.
 ### Réconciliation
 
 Un travail `@Cron` reprend chaque minute les paiements bloqués en `Processing`
-depuis plus de cinq minutes, débités et jamais crédités parce que le processus
-est mort en pleine saga, ainsi que tout ce qui est en `CompensationPending`, et
-rejoue la compensation. Vérifié : un paiement laissé en `CompensationPending`
-atteint `Compensated` à la passe suivante.
+depuis plus de cinq minutes, ainsi que les paiements en `CompensationPending`.
+Si le débit est enregistré mais le crédit incertain, il recherche le mouvement
+`:credit` : un mouvement retrouvé permet d’approuver le paiement et de publier
+les deux mouvements comptables dans la même transaction. Une lecture vide ou
+indisponible laisse `Processing`, sans remboursement ni nouveau crédit.
+
+Cette politique privilégie la sûreté : une requête initiale peut encore aboutir
+après une lecture vide. Si aucun crédit n’apparaît, une intervention reste
+nécessaire pour établir définitivement son issue. Une annulation atomique de
+la clé côté `accounts` serait nécessaire pour automatiser ce remboursement.
+Les décisions de remboursement confirmées en `CompensationPending` sont réessayées.
 
 ### Suivre un paiement à travers les trois services
 

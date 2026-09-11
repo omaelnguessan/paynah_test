@@ -1,23 +1,14 @@
 import { Inject, Logger } from '@nestjs/common';
 import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
 import { DomainError } from '../../../domain/errors/domain.error';
+import { InvalidTransitionError } from '../../../domain/errors/invalid-transition.error';
 import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
 import { Payment } from '../../../domain/model/payment';
 import { FailureReason, PaymentStatus } from '../../../domain/model/payment-status';
 import { Reference } from '../../../domain/model/reference';
-import {
-  ACCOUNTS_PORT,
-  AccountsPort,
-  MovementResult,
-} from '../../../domain/ports/accounts.port';
-import {
-  PAYMENT_REPOSITORY,
-  PaymentRepository,
-} from '../../../domain/ports/payment.repository';
-import {
-  TRANSACTIONS_PORT,
-  TransactionsPort,
-} from '../../../domain/ports/transactions.port';
+import { ACCOUNTS_PORT, AccountsPort, MovementResult } from '../../../domain/ports/accounts.port';
+import { PAYMENT_REPOSITORY, PaymentRepository } from '../../../domain/ports/payment.repository';
+import { TRANSACTIONS_PORT, TransactionsPort } from '../../../domain/ports/transactions.port';
 import {
   TRANSACTION_RUNNER,
   TransactionRunner,
@@ -51,7 +42,9 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
   ) {}
 
   async execute(command: CompensatePaymentCommand): Promise<string | null> {
-    const payment = await this.payments.findByReference(Reference.of('pay', command.paymentReference));
+    const payment = await this.payments.findByReference(
+      Reference.of('pay', command.paymentReference),
+    );
     if (!payment) {
       throw new PaymentNotFoundError(command.paymentReference);
     }
@@ -59,8 +52,29 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
       return payment.refundTransactionReference?.value ?? null;
     }
 
-    if (!payment.debitTransactionReference && !(await this.confirmDebit(payment))) {
+    if (
+      payment.status !== PaymentStatus.Processing &&
+      payment.status !== PaymentStatus.CompensationPending
+    ) {
+      throw new InvalidTransitionError(payment.status, PaymentStatus.Compensated);
+    }
+
+    const debitWasRecorded = payment.debitTransactionReference !== null;
+    if (!debitWasRecorded && !(await this.confirmDebit(payment))) {
       return null;
+    }
+    if (payment.status === PaymentStatus.Processing && debitWasRecorded) {
+      // Processing does not prove that the destination credit failed. Even a
+      // missing movement can still be in flight: never refund on that evidence.
+      await this.reconcileCredit(payment);
+      return null;
+    }
+
+    // Persist the refund decision before the external call, including when
+    // recovering a debit whose response was lost before any credit was sent.
+    if (payment.status === PaymentStatus.Processing) {
+      payment.markCompensationPending(FailureReason.CREDIT_FAILED);
+      await this.transaction.run(() => this.payments.save(payment));
     }
 
     try {
@@ -117,6 +131,50 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
       );
       return null;
     }
+  }
+
+  private async reconcileCredit(payment: Payment): Promise<void> {
+    let credit: MovementResult | null;
+    try {
+      credit = await this.accounts.findMovement(payment.destination, payment.movementKey('credit'));
+    } catch (error) {
+      this.logger.warn(
+        { payment_reference: payment.reference.value },
+        'credit outcome unavailable; no refund issued',
+      );
+      return;
+    }
+    if (!credit) {
+      this.logger.warn(
+        { payment_reference: payment.reference.value },
+        'credit outcome unresolved; no refund issued, reconciliation required',
+      );
+      return;
+    }
+
+    payment.approve(credit.transactionReference);
+    await this.transaction.run(async () => {
+      await this.payments.save(payment);
+      await this.ledger.record(payment, [
+        {
+          transactionId: payment.movementKey('debit'),
+          paymentReference: payment.reference,
+          type: 'DEBIT',
+          wallet: payment.source,
+          movementReference: payment.debitTransactionReference!,
+          occurredAt: payment.completedAt!,
+        },
+        {
+          transactionId: payment.movementKey('credit'),
+          paymentReference: payment.reference,
+          type: 'CREDIT',
+          wallet: payment.destination,
+          movementReference: credit.transactionReference,
+          occurredAt: payment.completedAt!,
+        },
+      ]);
+    });
+    this.events.publishAll(payment.pullEvents());
   }
 
   /**

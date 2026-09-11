@@ -14,6 +14,7 @@ import { TRANSACTION_RUNNER } from '../../../domain/ports/transaction-runner.por
 import {
   CREDIT,
   DEBIT,
+  DESTINATION,
   InMemoryPaymentRepository,
   REFUND,
   SOURCE,
@@ -51,6 +52,7 @@ describe('CompensatePaymentHandler', () => {
 
   it('credits the source back and marks the payment Compensated', async () => {
     const payment = aDebitedPayment();
+    payment.markCompensationPending(FailureReason.CREDIT_FAILED);
     const { handler } = await handlerFor(payment);
     accounts.credit.mockResolvedValue(movement(REFUND));
 
@@ -71,6 +73,7 @@ describe('CompensatePaymentHandler', () => {
 
   it('journalises the refund as its own ledger movement', async () => {
     const payment = aDebitedPayment();
+    payment.markCompensationPending(FailureReason.CREDIT_FAILED);
     const { handler } = await handlerFor(payment);
     accounts.credit.mockResolvedValue(movement(REFUND));
 
@@ -102,6 +105,7 @@ describe('CompensatePaymentHandler', () => {
 
   it('parks the payment as CompensationPending when the refund does not go through', async () => {
     const payment = aDebitedPayment();
+    payment.markCompensationPending(FailureReason.CREDIT_FAILED);
     const { handler, payments } = await handlerFor(payment);
     accounts.credit.mockRejectedValue(new AccountsUnavailableError('credit'));
 
@@ -110,7 +114,7 @@ describe('CompensatePaymentHandler', () => {
     await expect(handler.execute(command(payment))).resolves.toBeNull();
 
     expect(payment.status).toBe(PaymentStatus.CompensationPending);
-    expect(payments.statuses).toEqual([PaymentStatus.CompensationPending]);
+    expect(payments.statuses).toEqual([]);
     expect(ledger.record).not.toHaveBeenCalled();
   });
 
@@ -211,6 +215,7 @@ describe('CompensatePaymentHandler', () => {
 
     it('does not ask when the aggregate already knows the debit', async () => {
       const payment = aDebitedPayment();
+      payment.markCompensationPending(FailureReason.CREDIT_FAILED);
       const { handler } = await handlerFor(payment);
       accounts.credit.mockResolvedValue(movement(REFUND));
 
@@ -218,6 +223,47 @@ describe('CompensatePaymentHandler', () => {
 
       expect(accounts.findMovement).not.toHaveBeenCalled();
     });
+  });
+
+  it('recovers an applied credit whose response or local commit was lost without refunding', async () => {
+    const payment = aDebitedPayment();
+    const { handler, payments } = await handlerFor(payment);
+    accounts.findMovement.mockResolvedValue(movement(CREDIT));
+
+    await expect(handler.execute(command(payment))).resolves.toBeNull();
+
+    expect(accounts.findMovement).toHaveBeenCalledWith(DESTINATION, payment.movementKey('credit'));
+    expect(accounts.credit).not.toHaveBeenCalled();
+    expect(payment.status).toBe(PaymentStatus.Approved);
+    expect(payments.statuses).toEqual([PaymentStatus.Approved]);
+    expect(ledger.record.mock.calls[0][1].map((entry: LedgerMovement) => entry.type)).toEqual([
+      'DEBIT',
+      'CREDIT',
+    ]);
+  });
+
+  it.each(['missing', 'unavailable'])('never refunds an uncertain credit: %s', async (outcome) => {
+    const payment = aDebitedPayment();
+    const { handler, payments } = await handlerFor(payment);
+    if (outcome === 'missing') accounts.findMovement.mockResolvedValue(null);
+    else accounts.findMovement.mockRejectedValue(new AccountsUnavailableError('find-movement'));
+
+    await handler.execute(command(payment));
+
+    expect(accounts.credit).not.toHaveBeenCalled();
+    expect(payments.saved).toEqual([]);
+    expect(payment.status).toBe(PaymentStatus.Processing);
+  });
+
+  it('waits for a delayed credit to become visible and then approves it', async () => {
+    const payment = aDebitedPayment();
+    const { handler } = await handlerFor(payment);
+    accounts.findMovement.mockResolvedValueOnce(null).mockResolvedValueOnce(movement(CREDIT));
+    await handler.execute(command(payment));
+    expect(payment.status).toBe(PaymentStatus.Processing);
+    await handler.execute(command(payment));
+    expect(payment.status).toBe(PaymentStatus.Approved);
+    expect(accounts.credit).not.toHaveBeenCalled();
   });
 
   it('reports a payment that does not exist', async () => {
@@ -236,9 +282,9 @@ describe('CompensatePaymentHandler', () => {
     const { handler, payments } = await handlerFor(payment);
     accounts.credit.mockResolvedValue(movement(REFUND));
 
-    // The aggregate refuses both the compensation and the fallback parking, so
-    // a settled payment can never be unwound by a stray command.
+    // Reject before issuing any external credit, not only when updating state.
     await expect(handler.execute(command(payment))).rejects.toBeInstanceOf(InvalidTransitionError);
+    expect(accounts.credit).not.toHaveBeenCalled();
     expect(payment.status).toBe(PaymentStatus.Approved);
     expect(payments.saved).toEqual([]);
   });

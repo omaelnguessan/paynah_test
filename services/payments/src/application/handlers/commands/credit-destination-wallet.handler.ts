@@ -1,17 +1,19 @@
 import { Inject, Logger } from '@nestjs/common';
 import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
+import { InvalidTransitionError } from '../../../domain/errors/invalid-transition.error';
+import { InsufficientBalanceError } from '../../../domain/errors/insufficient-balance.error';
+import {
+  CurrencyMismatchError,
+  WalletFrozenError,
+  WalletNotFoundError,
+} from '../../../domain/errors/wallet.errors';
+import { FailureReason, PaymentStatus } from '../../../domain/model/payment-status';
 import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
 import { Payment } from '../../../domain/model/payment';
 import { Reference } from '../../../domain/model/reference';
-import { ACCOUNTS_PORT, AccountsPort } from '../../../domain/ports/accounts.port';
-import {
-  PAYMENT_REPOSITORY,
-  PaymentRepository,
-} from '../../../domain/ports/payment.repository';
-import {
-  TRANSACTIONS_PORT,
-  TransactionsPort,
-} from '../../../domain/ports/transactions.port';
+import { ACCOUNTS_PORT, AccountsPort, MovementResult } from '../../../domain/ports/accounts.port';
+import { PAYMENT_REPOSITORY, PaymentRepository } from '../../../domain/ports/payment.repository';
+import { TRANSACTIONS_PORT, TransactionsPort } from '../../../domain/ports/transactions.port';
 import {
   TRANSACTION_RUNNER,
   TransactionRunner,
@@ -23,13 +25,11 @@ import { CreditDestinationWalletCommand } from '../../commands/credit-destinatio
  * movements to the ledger — the approval and the outbox rows commit together,
  * so the ledger can never learn about a payment the database does not have.
  *
- * A failure here is not declined: the source has already been debited, so the
- * saga must compensate rather than pretend nothing happened.
+ * An explicit refusal permits compensation. An uncertain outcome remains
+ * Processing until reconciliation establishes whether the credit landed.
  */
 @CommandHandler(CreditDestinationWalletCommand)
-export class CreditDestinationWalletHandler
-  implements ICommandHandler<CreditDestinationWalletCommand>
-{
+export class CreditDestinationWalletHandler implements ICommandHandler<CreditDestinationWalletCommand> {
   private readonly logger = new Logger(CreditDestinationWalletHandler.name);
 
   constructor(
@@ -41,17 +41,42 @@ export class CreditDestinationWalletHandler
   ) {}
 
   async execute(command: CreditDestinationWalletCommand): Promise<string> {
-    const payment = await this.payments.findByReference(Reference.of('pay', command.paymentReference));
+    const payment = await this.payments.findByReference(
+      Reference.of('pay', command.paymentReference),
+    );
     if (!payment) {
       throw new PaymentNotFoundError(command.paymentReference);
     }
 
-    const movement = await this.accounts.credit(
-      payment.destination,
-      payment.money,
-      payment.movementKey('credit'),
-      { description: payment.description, paymentReference: payment.reference },
-    );
+    if (payment.status === PaymentStatus.Approved) {
+      return payment.creditTransactionReference!.value;
+    }
+    if (payment.status !== PaymentStatus.Processing || !payment.debitTransactionReference) {
+      throw new InvalidTransitionError(payment.status, PaymentStatus.Approved);
+    }
+
+    let movement: MovementResult;
+    try {
+      movement = await this.accounts.credit(
+        payment.destination,
+        payment.money,
+        payment.movementKey('credit'),
+        { description: payment.description, paymentReference: payment.reference },
+      );
+    } catch (error) {
+      // Only an explicit refusal makes a refund safe. Transport failures and
+      // local persistence failures leave Processing for outcome reconciliation.
+      if (
+        error instanceof WalletFrozenError ||
+        error instanceof WalletNotFoundError ||
+        error instanceof CurrencyMismatchError ||
+        error instanceof InsufficientBalanceError
+      ) {
+        payment.markCompensationPending(FailureReason.CREDIT_FAILED);
+        await this.transaction.run(() => this.payments.save(payment));
+      }
+      throw error;
+    }
 
     payment.approve(movement.transactionReference);
 

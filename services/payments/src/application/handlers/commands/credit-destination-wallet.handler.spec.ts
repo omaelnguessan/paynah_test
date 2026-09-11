@@ -1,6 +1,7 @@
 import { EventBus } from '@nestjs/cqrs';
 import { Test } from '@nestjs/testing';
 import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
+import { WalletFrozenError } from '../../../domain/errors/wallet.errors';
 import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
 import { PaymentApprovedEvent } from '../../../domain/events/payment-approved.event';
 import { Payment } from '../../../domain/model/payment';
@@ -62,8 +63,7 @@ describe('CreditDestinationWalletHandler', () => {
     });
   });
 
-  const command = (payment: Payment) =>
-    new CreditDestinationWalletCommand(payment.reference.value);
+  const command = (payment: Payment) => new CreditDestinationWalletCommand(payment.reference.value);
 
   it('credits the destination and approves the payment', async () => {
     const payment = aDebitedPayment();
@@ -119,7 +119,7 @@ describe('CreditDestinationWalletHandler', () => {
     expect(events.publishAll).toHaveBeenCalledWith([expect.any(PaymentApprovedEvent)]);
   });
 
-  it('leaves the payment untouched when the credit fails, for the saga to unwind', async () => {
+  it('leaves an uncertain credit Processing for reconciliation', async () => {
     const payment = aDebitedPayment();
     const { handler, payments } = await handlerFor(payment);
     accounts.credit.mockRejectedValue(new AccountsUnavailableError('credit'));
@@ -128,11 +128,29 @@ describe('CreditDestinationWalletHandler', () => {
       AccountsUnavailableError,
     );
 
-    // Not Declined: the source is already short, so only a refund can settle it.
+    // A lost response may hide a successful credit; a refund would be unsafe.
     expect(payment.status).toBe(PaymentStatus.Processing);
     expect(payments.saved).toEqual([]);
     expect(ledger.record).not.toHaveBeenCalled();
     expect(events.publishAll).not.toHaveBeenCalled();
+  });
+
+  it('persists a confirmed refusal before allowing compensation', async () => {
+    const payment = aDebitedPayment();
+    const { handler, payments } = await handlerFor(payment);
+    accounts.credit.mockRejectedValue(new WalletFrozenError(DESTINATION.value));
+    await expect(handler.execute(command(payment))).rejects.toBeInstanceOf(WalletFrozenError);
+    expect(payments.statuses).toEqual([PaymentStatus.CompensationPending]);
+    expect(ledger.record).not.toHaveBeenCalled();
+  });
+
+  it('does not classify a failed approval commit as a refused credit', async () => {
+    const payment = aDebitedPayment();
+    const { handler, payments } = await handlerFor(payment);
+    accounts.credit.mockResolvedValue(movement(CREDIT));
+    jest.spyOn(payments, 'save').mockRejectedValue(new Error('database unavailable'));
+    await expect(handler.execute(command(payment))).rejects.toThrow('database unavailable');
+    expect(payments.statuses).not.toContain(PaymentStatus.CompensationPending);
   });
 
   it('refuses to approve a payment that was never debited', async () => {
@@ -142,6 +160,7 @@ describe('CreditDestinationWalletHandler', () => {
     accounts.credit.mockResolvedValue(movement(CREDIT));
 
     await expect(handler.execute(command(payment))).rejects.toThrow();
+    expect(accounts.credit).not.toHaveBeenCalled();
     expect(ledger.record).not.toHaveBeenCalled();
   });
 

@@ -7,12 +7,9 @@ import { CreditDestinationWalletCommand } from '../commands/credit-destination-w
 import { DebitSourceWalletCommand } from '../commands/debit-source-wallet.command';
 
 /**
- * The orchestration, and nothing else.
- *
- * Each step is a command with its own transaction; the saga only decides what
- * happens next. A debit that fails ends the payment — the debit handler has
- * already declined it. A credit that fails cannot: the source is already short,
- * so the only correct answer is to give the money back.
+ * Orchestrates the debit and credit. After a credit-step error, the recovery
+ * handler refunds only a persisted refusal; an uncertain credit is reconciled
+ * by reading its movement, never by assuming the destination received nothing.
  */
 @Injectable()
 export class PaymentSaga {
@@ -39,7 +36,7 @@ export class PaymentSaga {
           payment_reference: reference.value,
           cause: error instanceof DomainError ? error.code : String(error),
         },
-        'credit failed after the debit went through, compensating',
+        'credit step failed; resolving its outcome before any refund',
       );
       await this.commands.execute(new CompensatePaymentCommand(reference.value));
     }

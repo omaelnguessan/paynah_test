@@ -530,3 +530,18 @@ existe. Sauf que si le débit n'a jamais eu lieu, ce « rejeu » l'applique pour
 bon, et il faut le rembourser dans la foulée. Le solde final serait juste, avec
 deux lignes de ledger inventées à chaque réparation. J'ai préféré vingt lignes
 de plus dans `accounts`.
+
+
+## 25. Un crédit inconnu n’autorise pas un remboursement
+
+La compensation automatique sur timeout de crédit pouvait rendre l’argent à
+la source alors que la destination l’avait reçu. Désormais, un refus métier
+confirmé est persisté en `CompensationPending` avant le remboursement. Un
+timeout, une réponse ambiguë ou une panne de commit laisse `Processing`.
+Le réconciliateur recherche `:credit` et finalise l’approbation si le mouvement
+existe. Une absence, même répétée, n’autorise pas un remboursement : la requête
+peut encore être en cours. Ces cas restent en attente d’une résolution opérateur.
+Un refus reçu après une tentative HTTP incertaine reste lui-même incertain.
+
+Ce choix remplace la règle précédente « tout échec du crédit se compense ».
+Il ne résout pas la coordination de plusieurs orchestrateurs concurrents.

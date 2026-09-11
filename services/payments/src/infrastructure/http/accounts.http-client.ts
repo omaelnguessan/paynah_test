@@ -197,6 +197,9 @@ export class AccountsHttpClient implements AccountsPort {
         return response.data.data;
       } catch (error) {
         if (error instanceof DomainError) {
+          if (lastError !== undefined) {
+            throw new AccountsUnavailableError(operation, 'refusal after an uncertain attempt');
+          }
           throw error;
         }
         lastError = error;

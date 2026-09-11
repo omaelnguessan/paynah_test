@@ -2,10 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { CommandBus } from '@nestjs/cqrs';
 import { PaymentStatus } from '../../domain/model/payment-status';
-import {
-  PAYMENT_REPOSITORY,
-  PaymentRepository,
-} from '../../domain/ports/payment.repository';
+import { PAYMENT_REPOSITORY, PaymentRepository } from '../../domain/ports/payment.repository';
 import { CompensatePaymentCommand } from '../../application/commands/compensate-payment.command';
 
 /** A payment still Processing after this long lost its saga to a crash. */
@@ -13,13 +10,9 @@ const STUCK_AFTER_MS = 5 * 60 * 1000;
 const BATCH_SIZE = 20;
 
 /**
- * Finishes what a crashed process left half-done.
- *
- * Two populations: payments stuck in `Processing` — debited, never credited,
- * because the service died mid-saga — and `CompensationPending`, where the
- * refund is owed and did not go through. Both get the same answer: give the
- * money back. The refund carries the payment's `:refund` idempotency key, so
- * running this against a payment that was in fact fine changes nothing.
+ * Recovers interrupted payments. Processing may hide a successful credit:
+ * the handler resolves that outcome before deciding anything. Only confirmed
+ * refund decisions in CompensationPending are retried as refunds.
  */
 @Injectable()
 export class ReconciliationJob {
