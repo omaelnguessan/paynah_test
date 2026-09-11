@@ -1,3 +1,4 @@
+import { PAYMENT_EXECUTION } from '../../../domain/ports/payment-execution.port';
 import { EventBus } from '@nestjs/cqrs';
 import { Test } from '@nestjs/testing';
 import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
@@ -29,6 +30,10 @@ describe('DebitSourceWalletHandler', () => {
     const payments = new InMemoryPaymentRepository(stored);
     const moduleRef = await Test.createTestingModule({
       providers: [
+        {
+          provide: PAYMENT_EXECUTION,
+          useValue: { run: (_key: string, work: () => Promise<unknown>) => work() },
+        },
         DebitSourceWalletHandler,
         { provide: PAYMENT_REPOSITORY, useValue: payments },
         { provide: ACCOUNTS_PORT, useValue: accounts },
@@ -42,6 +47,14 @@ describe('DebitSourceWalletHandler', () => {
   beforeEach(() => jest.resetAllMocks());
 
   const command = (payment: Payment) => new DebitSourceWalletCommand(payment.reference.value);
+
+  it('refuses a repeated debit before calling accounts', async () => {
+    const payment = aPayment();
+    payment.markProcessing();
+    const { handler } = await handlerFor(payment);
+    await expect(handler.execute(command(payment))).rejects.toThrow();
+    expect(accounts.debit).not.toHaveBeenCalled();
+  });
 
   it('moves to Processing before calling accounts, so a crash leaves a trace', async () => {
     const payment = aPayment();
@@ -65,12 +78,10 @@ describe('DebitSourceWalletHandler', () => {
 
     await handler.execute(command(payment));
 
-    expect(accounts.debit).toHaveBeenCalledWith(
-      SOURCE,
-      payment.money,
-      payment.reference.value,
-      { description: payment.description, paymentReference: payment.reference },
-    );
+    expect(accounts.debit).toHaveBeenCalledWith(SOURCE, payment.money, payment.reference.value, {
+      description: payment.description,
+      paymentReference: payment.reference,
+    });
   });
 
   it('declines and rethrows when accounts refuses the movement', async () => {

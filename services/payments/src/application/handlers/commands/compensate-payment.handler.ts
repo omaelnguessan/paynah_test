@@ -1,3 +1,4 @@
+import { PAYMENT_EXECUTION, PaymentExecution } from '../../../domain/ports/payment-execution.port';
 import { Inject, Logger } from '@nestjs/common';
 import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
 import { DomainError } from '../../../domain/errors/domain.error';
@@ -34,6 +35,7 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
   private readonly logger = new Logger(CompensatePaymentHandler.name);
 
   constructor(
+    @Inject(PAYMENT_EXECUTION) private readonly execution: PaymentExecution,
     @Inject(PAYMENT_REPOSITORY) private readonly payments: PaymentRepository,
     @Inject(ACCOUNTS_PORT) private readonly accounts: AccountsPort,
     @Inject(TRANSACTIONS_PORT) private readonly ledger: TransactionsPort,
@@ -42,6 +44,10 @@ export class CompensatePaymentHandler implements ICommandHandler<CompensatePayme
   ) {}
 
   async execute(command: CompensatePaymentCommand): Promise<string | null> {
+    return this.execution.run(command.paymentReference, () => this.executeLocked(command));
+  }
+
+  private async executeLocked(command: CompensatePaymentCommand): Promise<string | null> {
     const payment = await this.payments.findByReference(
       Reference.of('pay', command.paymentReference),
     );

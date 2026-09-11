@@ -1,3 +1,5 @@
+import { PAYMENT_EXECUTION } from './domain/ports/payment-execution.port';
+import { PostgresPaymentExecution } from './infrastructure/persistence/postgres-payment-execution';
 import { HttpModule } from '@nestjs/axios';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { CqrsModule } from '@nestjs/cqrs';
@@ -99,6 +101,7 @@ const EVENT_HANDLERS = [PaymentApprovedHandler, PaymentDeclinedHandler, PaymentC
   controllers: [PaymentsController],
   providers: [
     // --- ports bound to their adapters ---
+    { provide: PAYMENT_EXECUTION, useClass: PostgresPaymentExecution },
     { provide: ACCOUNTS_PORT, useClass: AccountsHttpClient },
     { provide: TRANSACTIONS_PORT, useClass: TransactionsOutboxAdapter },
     { provide: PAYMENT_REPOSITORY, useClass: TypeOrmPaymentRepository },

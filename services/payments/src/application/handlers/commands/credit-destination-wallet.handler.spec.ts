@@ -1,3 +1,4 @@
+import { PAYMENT_EXECUTION } from '../../../domain/ports/payment-execution.port';
 import { EventBus } from '@nestjs/cqrs';
 import { Test } from '@nestjs/testing';
 import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
@@ -43,6 +44,10 @@ describe('CreditDestinationWalletHandler', () => {
     };
     const moduleRef = await Test.createTestingModule({
       providers: [
+        {
+          provide: PAYMENT_EXECUTION,
+          useValue: { run: (_key: string, work: () => Promise<unknown>) => work() },
+        },
         CreditDestinationWalletHandler,
         { provide: PAYMENT_REPOSITORY, useValue: payments },
         { provide: ACCOUNTS_PORT, useValue: accounts },

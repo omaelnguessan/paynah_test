@@ -1,10 +1,5 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpStatus, Logger } from '@nestjs/common';
-import {
-  ApiResponse,
-  ResponseCode,
-  ResponseMessage,
-  ResponseCodeValue,
-} from '@paynad/shared';
+import { ApiResponse, ResponseCode, ResponseMessage, ResponseCodeValue } from '@paynad/shared';
 import { DomainError } from '../../domain/errors/domain.error';
 
 interface ResponseLike {
@@ -70,6 +65,11 @@ const MAPPINGS: Readonly<Record<string, Mapping>> = {
     status: HttpStatus.SERVICE_UNAVAILABLE,
     code: ResponseCode.UPSTREAM_UNAVAILABLE,
     message: ResponseMessage.UPSTREAM_UNAVAILABLE,
+  },
+  PAYMENT_CONFLICT: {
+    status: HttpStatus.CONFLICT,
+    code: ResponseCode.DUPLICATE_TRANSACTION,
+    message: ResponseMessage.DUPLICATE_TRANSACTION,
   },
   INVALID_TRANSITION: {
     status: HttpStatus.CONFLICT,

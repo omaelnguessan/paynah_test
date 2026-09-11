@@ -556,3 +556,18 @@ recréer de paiement ni rejouer ses mouvements. COMPLETED décrit ici la créati
 de la ressource, pas la fin du transfert. Les requêtes concurrentes attendent la
 transaction qui possède la clé. La migration de réparation des anciennes clés
 doit être exécutée avec les anciennes instances payments arrêtées.
+
+
+## 27. Un seul traitement actif par paiement
+
+Un verrou de session PostgreSQL couvre la saga et les commandes de reprise,
+y compris les appels HTTP. Les commandes imbriquées rejoignent ce verrou.
+Un second worker reçoit un conflit et réessaiera plus tard. Les transactions
+locales réutilisent la connexion du verrou, sans garder une transaction ouverte
+pendant le réseau ni épuiser le pool avec une seconde connexion par saga.
+Une colonne version interdit aussi les sauvegardes d’agrégats périmés.
+Le débit vérifie l’état Pending avant tout effet externe.
+
+Une session PostgreSQL perdue libère son verrou ; cela n’annule pas un appel
+HTTP déjà parti. Le traitement des résultats inconnus et les clés idempotentes
+restent donc nécessaires, même avec cette exclusion mutuelle.

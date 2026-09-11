@@ -1,3 +1,4 @@
+import { PAYMENT_EXECUTION } from '../../domain/ports/payment-execution.port';
 import { Test } from '@nestjs/testing';
 import { CommandBus } from '@nestjs/cqrs';
 import { AccountsUnavailableError } from '../../domain/errors/accounts-unavailable.error';
@@ -17,7 +18,14 @@ describe('PaymentSaga', () => {
   beforeEach(async () => {
     jest.resetAllMocks();
     const moduleRef = await Test.createTestingModule({
-      providers: [PaymentSaga, { provide: CommandBus, useValue: commands }],
+      providers: [
+        {
+          provide: PAYMENT_EXECUTION,
+          useValue: { run: (_key: string, work: () => Promise<unknown>) => work() },
+        },
+        PaymentSaga,
+        { provide: CommandBus, useValue: commands },
+      ],
     }).compile();
     saga = moduleRef.get(PaymentSaga);
   });

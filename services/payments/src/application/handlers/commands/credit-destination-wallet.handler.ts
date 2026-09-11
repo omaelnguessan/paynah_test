@@ -1,3 +1,4 @@
+import { PAYMENT_EXECUTION, PaymentExecution } from '../../../domain/ports/payment-execution.port';
 import { Inject, Logger } from '@nestjs/common';
 import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
 import { InvalidTransitionError } from '../../../domain/errors/invalid-transition.error';
@@ -33,6 +34,7 @@ export class CreditDestinationWalletHandler implements ICommandHandler<CreditDes
   private readonly logger = new Logger(CreditDestinationWalletHandler.name);
 
   constructor(
+    @Inject(PAYMENT_EXECUTION) private readonly execution: PaymentExecution,
     @Inject(PAYMENT_REPOSITORY) private readonly payments: PaymentRepository,
     @Inject(ACCOUNTS_PORT) private readonly accounts: AccountsPort,
     @Inject(TRANSACTIONS_PORT) private readonly ledger: TransactionsPort,
@@ -41,6 +43,10 @@ export class CreditDestinationWalletHandler implements ICommandHandler<CreditDes
   ) {}
 
   async execute(command: CreditDestinationWalletCommand): Promise<string> {
+    return this.execution.run(command.paymentReference, () => this.executeLocked(command));
+  }
+
+  private async executeLocked(command: CreditDestinationWalletCommand): Promise<string> {
     const payment = await this.payments.findByReference(
       Reference.of('pay', command.paymentReference),
     );

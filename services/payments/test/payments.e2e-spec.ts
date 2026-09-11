@@ -1,3 +1,6 @@
+import { PostgresPaymentExecution } from '../src/infrastructure/persistence/postgres-payment-execution';
+import { TransactionContext } from '../src/infrastructure/persistence/transaction-context';
+import { ConcurrentPaymentError } from '../src/domain/errors/concurrent-payment.error';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import {
@@ -538,6 +541,34 @@ describe('payments (e2e)', () => {
       expect(await balanceOf(wallet)).toBe(50_000);
       expect(await ledgerOf(wallet, reference)).toEqual([]);
     }, 60_000);
+  });
+
+  it('excludes a second worker with a PostgreSQL session lock', async () => {
+    const first = new PostgresPaymentExecution(dataSource, new TransactionContext(dataSource));
+    const second = new PostgresPaymentExecution(dataSource, new TransactionContext(dataSource));
+    const key = nextKey('lock');
+    let finish!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const done = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const inFlight = first.run(key, async () => {
+      entered();
+      await done;
+    });
+    await ready;
+    try {
+      await expect(second.run(key, async () => 'unsafe')).rejects.toBeInstanceOf(
+        ConcurrentPaymentError,
+      );
+    } finally {
+      finish();
+      await inFlight;
+    }
+    await expect(second.run(key, async () => 'released')).resolves.toBe('released');
   });
 
   describe('ten payments racing for a balance that covers six', () => {

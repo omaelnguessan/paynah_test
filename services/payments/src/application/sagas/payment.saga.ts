@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { PAYMENT_EXECUTION, PaymentExecution } from '../../domain/ports/payment-execution.port';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { CommandBus } from '@nestjs/cqrs';
 import { DomainError } from '../../domain/errors/domain.error';
 import { Reference } from '../../domain/model/reference';
@@ -15,9 +16,16 @@ import { DebitSourceWalletCommand } from '../commands/debit-source-wallet.comman
 export class PaymentSaga {
   private readonly logger = new Logger(PaymentSaga.name);
 
-  constructor(private readonly commands: CommandBus) {}
+  constructor(
+    private readonly commands: CommandBus,
+    @Inject(PAYMENT_EXECUTION) private readonly execution: PaymentExecution,
+  ) {}
 
   async run(reference: Reference): Promise<void> {
+    return this.execution.run(reference.value, () => this.runLocked(reference));
+  }
+
+  private async runLocked(reference: Reference): Promise<void> {
     try {
       await this.commands.execute(new DebitSourceWalletCommand(reference.value));
     } catch (error) {

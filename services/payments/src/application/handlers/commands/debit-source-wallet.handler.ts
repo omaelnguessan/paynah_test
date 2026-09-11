@@ -1,3 +1,6 @@
+import { InvalidTransitionError } from '../../../domain/errors/invalid-transition.error';
+import { PaymentStatus } from '../../../domain/model/payment-status';
+import { PAYMENT_EXECUTION, PaymentExecution } from '../../../domain/ports/payment-execution.port';
 import { Inject, Logger } from '@nestjs/common';
 import { CommandHandler, EventBus, ICommandHandler } from '@nestjs/cqrs';
 import { AccountsUnavailableError } from '../../../domain/errors/accounts-unavailable.error';
@@ -5,10 +8,7 @@ import { DomainError } from '../../../domain/errors/domain.error';
 import { PaymentNotFoundError } from '../../../domain/errors/payment.errors';
 import { Reference } from '../../../domain/model/reference';
 import { ACCOUNTS_PORT, AccountsPort } from '../../../domain/ports/accounts.port';
-import {
-  PAYMENT_REPOSITORY,
-  PaymentRepository,
-} from '../../../domain/ports/payment.repository';
+import { PAYMENT_REPOSITORY, PaymentRepository } from '../../../domain/ports/payment.repository';
 import {
   TRANSACTION_RUNNER,
   TransactionRunner,
@@ -32,6 +32,7 @@ export class DebitSourceWalletHandler implements ICommandHandler<DebitSourceWall
   private readonly logger = new Logger(DebitSourceWalletHandler.name);
 
   constructor(
+    @Inject(PAYMENT_EXECUTION) private readonly execution: PaymentExecution,
     @Inject(PAYMENT_REPOSITORY) private readonly payments: PaymentRepository,
     @Inject(ACCOUNTS_PORT) private readonly accounts: AccountsPort,
     @Inject(TRANSACTION_RUNNER) private readonly transaction: TransactionRunner,
@@ -39,11 +40,20 @@ export class DebitSourceWalletHandler implements ICommandHandler<DebitSourceWall
   ) {}
 
   async execute(command: DebitSourceWalletCommand): Promise<string> {
-    const payment = await this.payments.findByReference(Reference.of('pay', command.paymentReference));
+    return this.execution.run(command.paymentReference, () => this.executeLocked(command));
+  }
+
+  private async executeLocked(command: DebitSourceWalletCommand): Promise<string> {
+    const payment = await this.payments.findByReference(
+      Reference.of('pay', command.paymentReference),
+    );
     if (!payment) {
       throw new PaymentNotFoundError(command.paymentReference);
     }
 
+    if (payment.status !== PaymentStatus.Pending) {
+      throw new InvalidTransitionError(payment.status, PaymentStatus.Processing);
+    }
     payment.markProcessing();
     await this.transaction.run(() => this.payments.save(payment));
 

@@ -1,4 +1,11 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 import { bigintTransformer } from '@paynad/shared';
 
 /**
@@ -36,6 +43,9 @@ export class PaymentOrmEntity {
 
   @Column({ type: 'varchar', length: 255 })
   description: string;
+
+  @Column({ type: 'int', default: 1 })
+  version: number;
 
   @Column({ type: 'varchar', length: 24 })
   status: string;
